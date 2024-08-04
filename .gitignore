@@ -1,0 +1,9 @@
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.csv
+*.json
+*.pkl
+*.pickle
+.venv
