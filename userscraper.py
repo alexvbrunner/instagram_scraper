@@ -17,7 +17,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 from collections import deque
 
-MAX_WORKERS = 1
+MAX_WORKERS = 20
 
 # Add this global variable
 total_bandwidth = 0
@@ -100,7 +100,7 @@ def create_proxy_extension(proxy):
 def setup_driver(proxy):
     # Set up Chrome options
     chrome_options = Options()
-    # chrome_options.add_argument("--headless")  # Run in headless mode
+    chrome_options.add_argument("--headless=new")  # Run in headless mode
 
     # Create and add proxy authentication extension
     proxy_extension = create_proxy_extension(proxy)
