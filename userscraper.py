@@ -4,15 +4,19 @@ from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import time
-import os
 import random
 import zipfile
-import csv
 import re
 import concurrent.futures
 from functools import partial
 import threading
 import pymysql
+import base64
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+
+MAX_WORKERS = 1
 
 # Add this global variable
 total_bandwidth = 0
@@ -115,9 +119,7 @@ def parse_meta_tags(meta_tags):
         elif tag.get('name') == 'description':
             content = tag.get('content', '')
             # Correct the regex pattern to extract the bio accurately
-            print(content)
             bio_match = re.search(r'on Instagram: "(.*?)"', content, re.DOTALL)
-            print(bio_match)
             if bio_match:
                 data['bio'] = bio_match.group(1)
     return data
@@ -155,7 +157,10 @@ def scrape_instagram_head(username, proxies, max_retries=3):
             driver = setup_driver(proxy)
             
             driver.get(url)
-            time.sleep(5)  # Wait for the page to load
+            
+            # Wait for the meta tags to be present
+            wait = WebDriverWait(driver, 10)  # Maximum wait time of 10 seconds
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, "meta")))
             
             # Get page size and update bandwidth
             page_size = len(driver.page_source.encode('utf-8'))
@@ -168,34 +173,41 @@ def scrape_instagram_head(username, proxies, max_retries=3):
                 parsed_data = parse_meta_tags(meta_tags)
                 parsed_data['username'] = username
                 
-                # Save to database
-                conn = pymysql.connect(
-                    host='127.0.0.1',
-                    user='root',
-                    password='password',
-                    database='main'
-                )
-                try:
-                    with conn.cursor() as cursor:
-                        cursor.execute('''INSERT INTO instagram_profiles
-                                         (username, followers, following, posts, bio)
-                                         VALUES (%s, %s, %s, %s, %s)
-                                         ON DUPLICATE KEY UPDATE
-                                         followers = VALUES(followers),
-                                         following = VALUES(following),
-                                         posts = VALUES(posts),
-                                         bio = VALUES(bio)''',
-                                      (parsed_data['username'],
-                                       parsed_data.get('followers', ''),
-                                       parsed_data.get('following', ''),
-                                       parsed_data.get('posts', ''),
-                                       parsed_data.get('bio', '')))
-                    conn.commit()
-                finally:
-                    conn.close()
-                
-                print(f"\nData for {username} saved to database")
-                return parsed_data
+                # Check if all required keys are present
+                required_keys = ['username', 'followers', 'following', 'posts']
+                if all(key in parsed_data for key in required_keys):
+                    # Save to database
+                    conn = pymysql.connect(
+                        host='127.0.0.1',
+                        user='root',
+                        password='password',
+                        database='main'
+                    )
+                    try:
+                        with conn.cursor() as cursor:
+                            cursor.execute('''INSERT INTO instagram_profiles
+                                             (username, followers, following, posts, bio)
+                                             VALUES (%s, %s, %s, %s, %s)
+                                             ON DUPLICATE KEY UPDATE
+                                             followers = VALUES(followers),
+                                             following = VALUES(following),
+                                             posts = VALUES(posts),
+                                             bio = VALUES(bio)''',
+                                          (parsed_data['username'],
+                                           parsed_data['followers'],
+                                           parsed_data['following'],
+                                           parsed_data['posts'],
+                                           parsed_data.get('bio', '')))
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    
+                    print(f"\nData for {username} saved to database, {page_size} bytes, {total_bandwidth / (1024 * 1024):.2f} MB, data: {parsed_data}")
+                    return parsed_data
+                else:
+                    missing_keys = [key for key in required_keys if key not in parsed_data]
+                    print(f"Missing required keys for {username}: {missing_keys}")
+                    raise Exception(f"Missing required keys: {missing_keys}")
             else:
                 print(f"No meta tags found for {username}")
                 raise Exception("No meta tags found")
@@ -229,7 +241,7 @@ def main():
     scrape_func = partial(scrape_instagram_head, proxies=proxies)
     
     # Use ThreadPoolExecutor to run scraping in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         results = list(executor.map(scrape_func, usernames))
     
     successful = [result for result in results if result]
