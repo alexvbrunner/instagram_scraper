@@ -1,15 +1,14 @@
 import time
 import requests
 import pandas as pd
-from UTILS.utils import *
-import datetime
 import random
+import json
+import datetime
 import numpy as np
 
-
+# Global variable to store active hours and the last update day
 active_hours = []
 last_update_day = None
-
 
 def wait_with_jitter():
     global active_hours, last_update_day
@@ -57,12 +56,12 @@ def wait_with_jitter():
     print(f"Waiting for {jitter:.2f} seconds.")
     time.sleep(jitter)
 
-
 def get_all_following(user_id, cookies):
     base_url = f"https://i.instagram.com/api/v1/friendships/{user_id}/followers/"
     params = {'count': 100}
     followers = []
-
+    request_count = 0
+    start_time = time.time()
     next_max_id = None
     cookie_index = 0  # Index to track the current cookie being used
 
@@ -126,11 +125,9 @@ def get_all_following(user_id, cookies):
         followers_df.to_csv('followers_list.csv', mode='a', header=False, index=False)
         print("Saved remaining followers.")
 
-
 # Example usage with multiple cookies
 cookies = [
-    'cookie_string_here'
+'mid=ZpZeDQAEAAHuc0IRe4KVoPgzAdLR; ig_did=36D34B39-BE6C-47C3-A307-52C8E408F81E; datr=OF6WZrvsarLn4bMSQpzdcNY7; shbid="1280\0547943566320\0541754224106:01f76f470a0474fbe7a0882e925071bcf8452ca7209139ee40bdb7fd08a9ddec40931021"; shbts="1722688106\0547943566320\0541754224106:01f72cb78207bb65e7b518f7e9724f3761d23c065e2500878da8f95ef4077759919a5f03"; csrftoken=Ya2bWZTCamRniAb3mLnLqX3lQZIooYII; ds_user_id=7943566320; sessionid=7943566320%3AgPttqfmrEoTzP9%3A10%3AAYeA3dBZktfFOb10-au2wMRwOPaGPS-k19M9mPbATQ; rur="LDC\0547943566320\0541754334913:01f743d632ec2f4605f6422642275bf617a6a95a31465abed49ad90a608f1d04d5a0b28e"; wd=459x812'
 ]
-
-user_id = "25922742395"
+user_id="25922742395"
 followers_list = get_all_following(user_id, cookies)
