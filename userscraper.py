@@ -7,6 +7,8 @@ import time
 import os
 import random
 import zipfile
+import csv
+import re
 
 def get_proxies_from_file(file_path):
     with open(file_path, 'r') as f:
@@ -92,6 +94,26 @@ def setup_driver(proxy):
 
     return driver
 
+def parse_meta_tags(meta_tags):
+    data = {}
+    for tag in meta_tags:
+        if tag.get('property') == 'og:description':
+            content = tag.get('content', '')
+            match = re.match(r'(\d+\.?\d*[KM]?) Followers, (\d+) Following, (\d+) Posts', content)
+            if match:
+                data['followers'] = match.group(1)
+                data['following'] = match.group(2)
+                data['posts'] = match.group(3)
+        elif tag.get('name') == 'description':
+            content = tag.get('content', '')
+            # Correct the regex pattern to extract the bio accurately
+            print(content)
+            bio_match = re.search(r'on Instagram: "(.*?)"', content, re.DOTALL)
+            print(bio_match)
+            if bio_match:
+                data['bio'] = bio_match.group(1)
+    return data
+
 def scrape_instagram_head(username, proxies):
     url = f"https://www.instagram.com/{username}/"
 
@@ -109,18 +131,22 @@ def scrape_instagram_head(username, proxies):
         meta_tags = soup.find_all('meta')
         
         if meta_tags:
-            # Print the meta tags
-            print("Meta tags found:")
-            for tag in meta_tags:
-                print(tag)
+            parsed_data = parse_meta_tags(meta_tags)
+            parsed_data['username'] = username
             
-            # Export the meta tags as HTML
-            with open(f"{username}_meta_tags.html", "w", encoding="utf-8") as f:
-                f.write("\n".join(str(tag) for tag in meta_tags))
+            # Save to CSV
+            csv_file = 'instagram_data.csv'
+            file_exists = os.path.isfile(csv_file)
             
-            print(f"\nMeta tags exported to {username}_meta_tags.html")
+            with open(csv_file, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=['username', 'followers', 'following', 'posts', 'bio'])
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(parsed_data)
             
-            return meta_tags
+            print(f"\nData for {username} saved to {csv_file}")
+            print(parsed_data)
+            return parsed_data
         else:
             print("No meta tags found")
             return None
@@ -139,6 +165,7 @@ username = "gringa.ecom"
 result = scrape_instagram_head(username, proxies)
 
 if result:
-    print("\nHead tag found and exported successfully.")
+    print("\nData extracted and saved successfully.")
+    print(result)
 else:
-    print("Failed to retrieve or export the head tag.")
+    print("Failed to retrieve or save the data.")
