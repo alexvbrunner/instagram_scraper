@@ -15,12 +15,18 @@ import base64
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
+from collections import deque
 
 MAX_WORKERS = 1
 
 # Add this global variable
 total_bandwidth = 0
 bandwidth_lock = threading.Lock()
+
+# New global variables
+scrape_count = 0
+scrape_times = deque(maxlen=10)  # Store the last 10 scrape times
+scrape_lock = threading.Lock()
 
 def get_proxies_from_file(file_path):
     with open(file_path, 'r') as f:
@@ -148,7 +154,21 @@ def create_database():
     finally:
         conn.close()
 
+def update_scrape_stats(scrape_time):
+    global scrape_count
+    with scrape_lock:
+        scrape_count += 1
+        scrape_times.append(scrape_time)
+
+def print_scrape_stats():
+    with scrape_lock:
+        if scrape_times:
+            avg_time = sum(scrape_times) / len(scrape_times)
+            scrapes_per_minute = 60 / avg_time if avg_time > 0 else 0
+            print(f"\rScrapes: {scrape_count}, Speed: {scrapes_per_minute:.2f} scrapes/minute", end="", flush=True)
+
 def scrape_instagram_head(username, proxies, max_retries=3):
+    start_time = time.time()
     for attempt in range(max_retries):
         try:
             url = f"https://www.instagram.com/{username}/"
@@ -202,6 +222,10 @@ def scrape_instagram_head(username, proxies, max_retries=3):
                     finally:
                         conn.close()
                     
+                    scrape_time = time.time() - start_time
+                    update_scrape_stats(scrape_time)
+                    print_scrape_stats()
+                    
                     print(f"\nData for {username} saved to database, {page_size} bytes, {total_bandwidth / (1024 * 1024):.2f} MB, data: {parsed_data}")
                     return parsed_data
                 else:
@@ -222,6 +246,9 @@ def scrape_instagram_head(username, proxies, max_retries=3):
             if 'driver' in locals():
                 driver.quit()
     
+    scrape_time = time.time() - start_time
+    update_scrape_stats(scrape_time)
+    print_scrape_stats()
     return None
 
 def get_usernames_from_file(file_path):
@@ -240,16 +267,22 @@ def main():
     # Use partial to create a function with fixed proxies argument
     scrape_func = partial(scrape_instagram_head, proxies=proxies)
     
-    # Use ThreadPoolExecutor to run scraping in parallel
+    start_time = time.time()
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         results = list(executor.map(scrape_func, usernames))
+    
+    end_time = time.time()
+    total_time = end_time - start_time
     
     successful = [result for result in results if result]
     failed = len(usernames) - len(successful)
     
-    print(f"\nScraping completed.")
+    print(f"\n\nScraping completed.")
+    print(f"Total scrapes: {scrape_count}")
     print(f"Successfully scraped: {len(successful)} profiles")
     print(f"Failed to scrape: {failed} profiles")
+    print(f"Total time: {total_time:.2f} seconds")
+    print(f"Average speed: {(scrape_count / total_time) * 60:.2f} scrapes/minute")
     print(f"Total bandwidth used: {total_bandwidth / (1024 * 1024):.2f} MB")
 
 if __name__ == "__main__":
