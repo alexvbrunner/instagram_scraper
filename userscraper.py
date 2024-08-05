@@ -101,6 +101,13 @@ def setup_driver(proxy):
     # Set up Chrome options
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")  # Run in headless mode
+    
+    # Add these options to reduce bandwidth usage
+    chrome_options.add_argument("--blink-settings=imagesEnabled=false")  # Disable image loading
+    chrome_options.add_argument("--disable-gpu")  # Disable GPU hardware acceleration
+    chrome_options.add_argument("--no-sandbox")  # Disable the sandbox for slightly faster startup
+    chrome_options.add_argument("--disable-dev-shm-usage")  # Overcome limited resource problems
+    chrome_options.add_argument("--disable-javascript")  # Disable JavaScript (use with caution)
 
     # Create and add proxy authentication extension
     proxy_extension = create_proxy_extension(proxy)
