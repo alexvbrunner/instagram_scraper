@@ -9,6 +9,8 @@ import random
 import zipfile
 import csv
 import re
+import concurrent.futures
+from functools import partial
 
 def get_proxies_from_file(file_path):
     with open(file_path, 'r') as f:
@@ -99,7 +101,7 @@ def parse_meta_tags(meta_tags):
     for tag in meta_tags:
         if tag.get('property') == 'og:description':
             content = tag.get('content', '')
-            match = re.match(r'(\d+\.?\d*[KM]?) Followers, (\d+) Following, (\d+) Posts', content)
+            match = re.match(r'([\d,]+\.?\d*[KM]?) Followers, ([\d,]+) Following, ([\d,]+) Posts', content)
             if match:
                 data['followers'] = match.group(1)
                 data['following'] = match.group(2)
@@ -114,58 +116,74 @@ def parse_meta_tags(meta_tags):
                 data['bio'] = bio_match.group(1)
     return data
 
-def scrape_instagram_head(username, proxies):
-    url = f"https://www.instagram.com/{username}/"
-
-    # Rotate proxy for each request
-    proxy = get_random_proxy(proxies)
-    print(f"Using proxy: {proxy}")
-    driver = setup_driver(proxy)
+def scrape_instagram_head(username, proxies, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            url = f"https://www.instagram.com/{username}/"
+            proxy = get_random_proxy(proxies)
+            print(f"Attempt {attempt + 1} for {username} using proxy: {proxy}")
+            driver = setup_driver(proxy)
+            
+            driver.get(url)
+            time.sleep(5)  # Wait for the page to load
+            
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            meta_tags = soup.find_all('meta')
+            
+            if meta_tags:
+                parsed_data = parse_meta_tags(meta_tags)
+                parsed_data['username'] = username
+                
+                # Save to CSV
+                csv_file = 'instagram_data.csv'
+                file_exists = os.path.isfile(csv_file)
+                
+                with open(csv_file, 'a', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=['username', 'followers', 'following', 'posts', 'bio'])
+                    if not file_exists:
+                        writer.writeheader()
+                    writer.writerow(parsed_data)
+                
+                print(f"\nData for {username} saved to {csv_file}")
+                return parsed_data
+            else:
+                print(f"No meta tags found for {username}")
+        except Exception as e:
+            print(f"An error occurred while scraping {username}: {e}")
+            if attempt < max_retries - 1:
+                print(f"Retrying... (Attempt {attempt + 2}/{max_retries})")
+                time.sleep(random.uniform(1, 3))  # Add a random delay between retries
+            else:
+                print(f"Max retries reached for {username}. Moving to the next username.")
+        finally:
+            driver.quit()
     
-    try:
-        driver.get(url)
-        time.sleep(5)  # Wait for the page to load
-        
-        # Get the page source and parse it with BeautifulSoup
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        meta_tags = soup.find_all('meta')
-        
-        if meta_tags:
-            parsed_data = parse_meta_tags(meta_tags)
-            parsed_data['username'] = username
-            
-            # Save to CSV
-            csv_file = 'instagram_data.csv'
-            file_exists = os.path.isfile(csv_file)
-            
-            with open(csv_file, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=['username', 'followers', 'following', 'posts', 'bio'])
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerow(parsed_data)
-            
-            print(f"\nData for {username} saved to {csv_file}")
-            print(parsed_data)
-            return parsed_data
-        else:
-            print("No meta tags found")
-            return None
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return None
-    finally:
-        driver.quit()
+    return None
 
-# Load proxies from file
-proxies_file_path = "Webshare 10 proxies.txt"
-proxies = get_proxies_from_file(proxies_file_path)
+def get_usernames_from_file(file_path):
+    with open(file_path, 'r') as f:
+        return [line.strip() for line in f if line.strip()]
 
-# Example usage
-username = "gringa.ecom"
-result = scrape_instagram_head(username, proxies)
+def main():
+    proxies_file_path = "Webshare 10 proxies.txt"
+    usernames_file_path = "usernames.txt"
+    
+    proxies = get_proxies_from_file(proxies_file_path)
+    usernames = get_usernames_from_file(usernames_file_path)
+    
+    # Use partial to create a function with fixed proxies argument
+    scrape_func = partial(scrape_instagram_head, proxies=proxies)
+    
+    # Use ThreadPoolExecutor to run scraping in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(scrape_func, usernames))
+    
+    successful = [result for result in results if result]
+    failed = len(usernames) - len(successful)
+    
+    print(f"\nScraping completed.")
+    print(f"Successfully scraped: {len(successful)} profiles")
+    print(f"Failed to scrape: {failed} profiles")
 
-if result:
-    print("\nData extracted and saved successfully.")
-    print(result)
-else:
-    print("Failed to retrieve or save the data.")
+if __name__ == "__main__":
+    main()
