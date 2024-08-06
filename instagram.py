@@ -5,56 +5,11 @@ import random
 import json
 import datetime
 import numpy as np
+from UTILS.utils import wait_with_jitter
 
 # Global variable to store active hours and the last update day
 active_hours = []
 last_update_day = None
-
-def wait_with_jitter():
-    global active_hours, last_update_day
-    current_time = datetime.datetime.now()
-    current_day = current_time.day
-
-    # Update active hours with more variability
-    if last_update_day != current_day:
-        active_hours = [
-            (random.randint(6, 9), random.randint(10, 12)),
-            (random.randint(13, 16), random.randint(17, 19)),
-            (random.randint(19, 21), random.randint(22, 23))
-        ]
-        last_update_day = current_day
-
-    current_hour = current_time.hour
-    current_minute = current_time.minute
-
-    # Check if current time is within active hours
-    if not any(start <= current_hour < end for start, end in active_hours):
-        next_start = min((start for start, end in active_hours if start > current_hour), default=active_hours[0][0])
-        mean_sleep_time = ((next_start - current_hour) % 24) * 3600 - current_minute * 60
-        sleep_time = np.random.normal(loc=mean_sleep_time, scale=1800)  # Increased standard deviation
-        print(f"Inactive hours, sleeping for {max(0, int(sleep_time))} seconds.")
-        time.sleep(max(0, sleep_time))
-        return
-
-    # Simulate more human-like behavior during active hours
-    activity_type = random.choices(['quick', 'normal', 'engaged'], weights=[0.3, 0.5, 0.2])[0]
-    
-    if activity_type == 'quick':
-        jitter = np.random.exponential(scale=2)
-    elif activity_type == 'normal':
-        jitter = np.random.normal(loc=10, scale=5)
-    else:  # engaged
-        jitter = np.random.normal(loc=30, scale=10)
-
-    # Add micro-breaks
-    if random.random() < 0.1:  # 10% chance of a micro-break
-        jitter += np.random.uniform(60, 300)  # 1-5 minute break
-
-    # Ensure minimum wait time
-    jitter = max(jitter, 1)
-
-    print(f"Waiting for {jitter:.2f} seconds.")
-    time.sleep(jitter)
 
 def get_all_following(user_id, cookies):
     base_url = f"https://i.instagram.com/api/v1/friendships/{user_id}/followers/"
@@ -131,4 +86,3 @@ cookies = [
 ]
 user_id="25922742395"
 followers_list = get_all_following(user_id, cookies)
-
