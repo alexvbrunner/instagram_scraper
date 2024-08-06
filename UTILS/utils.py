@@ -56,13 +56,13 @@ def wait_with_jitter():
 
 def read_last_max_id():
     try:
-        with open('last_max_id.txt', 'r') as file:
+        with open('Files/last_max_id.txt', 'r') as file:
             return file.read().strip()
     except FileNotFoundError:
         return None
 
 def save_last_max_id(max_id):
-    with open('last_max_id.txt', 'w') as file:
+    with open('Files/last_max_id.txt', 'w') as file:
         file.write(max_id)
 
 def make_request(base_url, params, cookies, cookie_index):
