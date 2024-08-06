@@ -8,6 +8,7 @@ import datetime
 import random
 import numpy as np
 from UTILS.utils import wait_with_jitter
+from UTILS.json_parsing import upload_to_database, parse_user_info
 
 def get_user_info(user_id, cookies_string, proxy):
     # Convert cookies string to dictionary
@@ -85,30 +86,34 @@ def main():
         
         user_info, bandwidth_used = get_user_info(user_id, cookies, proxy)
 
-        print(user_info)
-        
         if user_info and 'user' in user_info:
-            user = user_info['user']
+            parsed_data = parse_user_info(user_info)
+            
             print("\nMain User Information:")
-            print(f"Username: {user.get('username', 'N/A')}")
-            print(f"Full Name: {user.get('full_name', 'N/A')}")
-            print(f"Follower Count: {user.get('follower_count', 'N/A')}")
-            print(f"Following Count: {user.get('following_count', 'N/A')}")
-            print(f"Media Count: {user.get('media_count', 'N/A')}")
-            print(f"Is Private: {user.get('is_private', 'N/A')}")
-            print(f"Is Verified: {user.get('is_verified', 'N/A')}")
-            print(f"Biography: {user.get('biography', 'N/A')}")
+            print(f"Username: {parsed_data['username']}")
+            print(f"Full Name: {parsed_data['full_name']}")
+            print(f"Follower Count: {parsed_data['follower_count']}")
+            print(f"Following Count: {parsed_data['following_count']}")
+            print(f"Media Count: {parsed_data['media_count']}")
+            print(f"Is Private: {parsed_data['is_private']}")
+            print(f"Is Verified: {parsed_data['is_verified']}")
+            print(f"Biography: {parsed_data['biography']}")
             
             print(f"\nTotal bandwidth used: {bandwidth_used} bytes")
 
             # Add gender guessing
-            full_name = user.get('full_name', '')
+            full_name = parsed_data['full_name']
             guessed_gender = guess_gender(full_name)
             print(f"Guessed gender for {full_name}: {guessed_gender}")
             
-            # Print full JSON response for debugging
-            print("\nFull JSON Response:")
-            print(json.dumps(user_info, indent=2))
+            # Add guessed gender to parsed_data
+            parsed_data['gender'] = guessed_gender
+            
+            # Upload parsed data to the database
+            upload_to_database(parsed_data)
+            
+            # print("\nFull JSON Response:")
+            # print(json.dumps(user_info, indent=2))
         else:
             print(f"Failed to retrieve information for user ID: {user_id}")
         
