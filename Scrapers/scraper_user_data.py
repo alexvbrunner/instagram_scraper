@@ -1,3 +1,28 @@
+"""
+Instagram User Data Scraper
+
+This script scrapes user data for a list of Instagram user IDs loaded from a CSV file. It uses a rotation of proxy and cookie pairs
+to make requests to Instagram's API, avoiding rate limiting and IP blocks.
+
+Features:
+- Fetches detailed user information including follower count, following count, media count, etc.
+- Uses proxy rotation to avoid IP blocks
+- Implements wait times with jitter to mimic human behavior
+- Guesses gender based on the user's full name
+- Calculates and reports bandwidth usage for each request
+- Uploads parsed data to a database
+
+Usage:
+    Ensure the following files are present:
+    - 'Files/proxy_cookie_pairs.json': JSON file containing proxy and cookie pairs
+    - 'Files/user_ids.csv': CSV file with user IDs to scrape
+
+    Run the script to process all user IDs and upload the data to the database.
+
+Note: This script requires requests, gender_guesser, and custom utility functions to be installed.
+"""
+
+import config
 import requests
 import json
 import gender_guesser.detector as gender
@@ -52,18 +77,23 @@ def get_user_info(user_id, cookies_string, proxy):
 
 def guess_gender(name):
     d = gender.Detector()
-    first_name = name.split()[0]
-    return d.get_gender(first_name)
+    if name and ' ' in name:
+        first_name = name.split()[0]
+    else:
+        first_name = name  # Use the entire name if there's no space
+    return d.get_gender(first_name) if first_name else 'unknown'
 
 def load_proxies(file_path):
     with open(file_path, 'r') as f:
         return [line.strip() for line in f if line.strip()]
 
 def load_user_ids(file_path):
+    user_ids = []
     with open(file_path, 'r') as f:
-        csv_reader = csv.reader(f)
-        next(csv_reader)  # Skip header
-        return [row[2] for row in csv_reader if row]
+        csv_reader = csv.DictReader(f)
+        for row in csv_reader:
+            user_ids.append(row['User ID'])
+    return list(set(user_ids))  # Remove duplicates
 
 def load_proxy_cookie_pairs(file_path):
     with open(file_path, 'r') as f:
@@ -72,7 +102,7 @@ def load_proxy_cookie_pairs(file_path):
 
 def main():
     proxy_cookie_pairs = load_proxy_cookie_pairs('Files/proxy_cookie_pairs.json')
-    user_ids = load_user_ids('Files/account_users.csv')
+    user_ids = load_user_ids('Files/user_ids.csv')
 
     for user_id in user_ids:
         wait_with_jitter()  # Add cooldown before each request

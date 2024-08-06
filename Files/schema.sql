@@ -54,3 +54,24 @@ CREATE TABLE IF NOT EXISTS pinned_channels (
     FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE,
     UNIQUE KEY (username, title)
 );
+
+CREATE TABLE IF NOT EXISTS followers (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    source_account VARCHAR(255),
+    pk BIGINT,
+    pk_id BIGINT,
+    username VARCHAR(255),
+    full_name VARCHAR(255),
+    is_private BOOLEAN,
+    fbid_v2 BIGINT,
+    third_party_downloads_enabled BOOLEAN,
+    strong_id BIGINT,
+    profile_pic_id VARCHAR(255),
+    profile_pic_url TEXT,
+    is_verified BOOLEAN,
+    has_anonymous_profile_picture BOOLEAN,
+    account_badges JSON,
+    latest_reel_media BIGINT,
+    is_favorite BOOLEAN,
+    gender VARCHAR(20)  -- Add this line
+);

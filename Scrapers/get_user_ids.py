@@ -1,3 +1,22 @@
+"""
+Instagram User ID Scraper
+
+This script fetches user IDs for Instagram usernames or profile URLs. It uses a list of proxy and cookie pairs
+to make requests to Instagram's API, avoiding rate limiting and IP blocks.
+
+The script reads usernames or URLs from an input file, processes them to extract usernames, fetches the
+corresponding user IDs, and saves the results to a CSV file.
+
+Usage:
+    Ensure the following files are present:
+    - 'Files/proxy_cookie_pairs.json': JSON file containing proxy and cookie pairs
+    - 'Files/input_usernames.txt': Text file with Instagram usernames or profile URLs (one per line)
+
+    Run the script to generate 'Files/user_ids.csv' with the results.
+
+Note: This script requires the requests library to be installed.
+"""
+
 import requests
 import json
 import random
