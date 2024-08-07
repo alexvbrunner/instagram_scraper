@@ -9,6 +9,9 @@ import numpy as np
 import os
 import json
 import concurrent.futures
+import mysql.connector
+from mysql.connector import Error
+import sys
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,8 +27,9 @@ class CookieState:
         self.fail_count = 0
 
 class InstagramScraper:
-    def __init__(self, user_id):
+    def __init__(self, user_id, csv_filename):
         self.user_id = user_id
+        self.csv_filename = csv_filename
         self.cookie_states = self.load_proxy_cookie_pairs()
         self.base_url = f"https://i.instagram.com/api/v1/friendships/{user_id}/followers/"
         self.params = {'count': 25}
@@ -43,6 +47,12 @@ class InstagramScraper:
         self.max_retries = 3
         self.stop_event = threading.Event()
         self.max_workers = len(self.cookie_states)
+        self.db_config = {
+            'host': '127.0.0.1',
+            'user': 'root',
+            'password': 'password',
+            'database': 'main'
+        }
 
     def load_proxy_cookie_pairs(self):
         with open('Files/proxy_cookie_pairs.json', 'r') as f:
@@ -50,18 +60,13 @@ class InstagramScraper:
         return [CookieState(pair['cookie'], pair['proxy'], pair['name'], i) for i, pair in enumerate(pairs)]
 
     def load_state(self):
-        if os.path.exists('scraper_state.json'):
-            with open('scraper_state.json', 'r') as f:
+        if os.path.exists('Files/scraper_state.json'):
+            with open('Files/scraper_state.json', 'r') as f:
                 state = json.load(f)
             self.user_id = state['user_id']
             self.cookie_states = []
             for cs in state['cookie_states']:
-                cookie_state = CookieState(
-                    cs['cookie'],
-                    cs.get('proxy', ''),  # Use an empty string if 'proxy' is not present
-                    cs.get('name', f"Cookie {cs['index']}"),  # Use a default name if 'name' is not present
-                    cs['index']
-                )
+                cookie_state = CookieState(cs['cookie'], cs['proxy'], cs['name'], cs['index'])
                 cookie_state.active = cs['active']
                 cookie_state.last_request_time = cs['last_request_time']
                 cookie_state.fail_count = cs.get('fail_count', 0)
@@ -79,10 +84,6 @@ class InstagramScraper:
             self.global_iteration = 0
             self.last_max_id = "0|"
             self.current_cookie_index = -1
-
-        # If cookie_states is empty, load from proxy_cookie_pairs.json
-        if not self.cookie_states:
-            self.cookie_states = self.load_proxy_cookie_pairs()
 
     def get_base_encoded_part(self):
         for cookie_state in self.cookie_states:
@@ -180,8 +181,6 @@ class InstagramScraper:
                     return None
                 else:
                     print(f"Request failed: {e}")
-            except requests.exceptions.RequestException as e:
-                print(f"Request exception: {e}")
             except Exception as e:
                 print(f"Unexpected error: {e}")
             
@@ -215,30 +214,68 @@ class InstagramScraper:
             print("No followers to save.")
             return
 
-        output_dir = 'instagram_followers'
-        os.makedirs(output_dir, exist_ok=True)
+        try:
+            connection = mysql.connector.connect(**self.db_config)
+            cursor = connection.cursor()
 
-        filename = f"{output_dir}/followers_{self.user_id}.csv"
+            insert_query = """
+            INSERT INTO followers (
+                source_account, pk, pk_id, username, full_name, is_private, fbid_v2,
+                third_party_downloads_enabled, strong_id, profile_pic_id, profile_pic_url,
+                is_verified, has_anonymous_profile_picture, account_badges, latest_reel_media,
+                is_favorite, gender, csv_filename
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            ) ON DUPLICATE KEY UPDATE
+                full_name = VALUES(full_name),
+                is_private = VALUES(is_private),
+                fbid_v2 = VALUES(fbid_v2),
+                third_party_downloads_enabled = VALUES(third_party_downloads_enabled),
+                strong_id = VALUES(strong_id),
+                profile_pic_id = VALUES(profile_pic_id),
+                profile_pic_url = VALUES(profile_pic_url),
+                is_verified = VALUES(is_verified),
+                has_anonymous_profile_picture = VALUES(has_anonymous_profile_picture),
+                account_badges = VALUES(account_badges),
+                latest_reel_media = VALUES(latest_reel_media),
+                is_favorite = VALUES(is_favorite),
+                gender = VALUES(gender),
+                csv_filename = VALUES(csv_filename)
+            """
 
-        columns_to_save = {
-            'pk': 'user_id',
-            'username': 'username',
-            'full_name': 'full_name',
-            'is_private': 'is_private',
-            'is_verified': 'is_verified',
-            'profile_pic_url': 'profile_pic_url'
-        }
+            for follower in followers:
+                data = (
+                    self.user_id,
+                    follower.get('pk'),
+                    follower.get('pk_id'),
+                    follower.get('username'),
+                    follower.get('full_name'),
+                    follower.get('is_private'),
+                    follower.get('fbid_v2'),
+                    follower.get('third_party_downloads_enabled'),
+                    follower.get('strong_id'),
+                    follower.get('profile_pic_id'),
+                    follower.get('profile_pic_url'),
+                    follower.get('is_verified'),
+                    follower.get('has_anonymous_profile_picture'),
+                    json.dumps(follower.get('account_badges', [])),
+                    follower.get('latest_reel_media'),
+                    follower.get('is_favorite'),
+                    follower.get('gender'),
+                    self.csv_filename
+                )
+                cursor.execute(insert_query, data)
 
-        df = pd.DataFrame(followers)
-        df_to_save = df[columns_to_save.keys()].rename(columns=columns_to_save)
+            connection.commit()
+            print(f"Inserted/Updated {len(followers)} followers in the database")
 
-        # Check if the file exists to determine whether to write headers
-        file_exists = os.path.isfile(filename)
-        
-        # Append to the CSV file without writing the index
-        df_to_save.to_csv(filename, mode='a', header=not file_exists, index=False)
+        except Error as e:
+            print(f"Error saving followers to database: {e}")
 
-        print(f"Appended {len(followers)} followers to {filename}")
+        finally:
+            if connection.is_connected():
+                cursor.close()
+                connection.close()
 
     def get_next_max_id(self):
         with self.max_id_lock:
@@ -272,12 +309,17 @@ class InstagramScraper:
             'last_max_id': self.last_max_id,
             'current_cookie_index': self.current_cookie_index
         }
-        with open('scraper_state.json', 'w') as f:
+        with open('Files/scraper_state.json', 'w') as f:
             json.dump(state, f)
 
 def main():
-    user_id = "25922742395"
-    scraper = InstagramScraper(user_id)
+    if len(sys.argv) != 3:
+        print("Usage: python v3_scraper.py <user_id> <csv_filename>")
+        sys.exit(1)
+
+    user_id = sys.argv[1]
+    csv_filename = sys.argv[2]
+    scraper = InstagramScraper(user_id, csv_filename)
     scraper.scrape_followers()
 
 if __name__ == "__main__":
