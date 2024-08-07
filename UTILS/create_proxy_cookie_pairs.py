@@ -8,7 +8,14 @@ def load_proxies(file_path):
 
 def load_cookies(file_path):
     with open(file_path, 'r') as f:
-        return [line.strip() for line in f if line.strip()]
+        cookies = []
+        for line in f:
+            line = line.strip()
+            if line:
+                # Remove surrounding quotes and replace escaped quotes
+                line = line.strip("'").replace('\\"', '"')
+                cookies.append(line)
+        return cookies
 
 def create_pairs(proxies, cookies):
     # Ensure we have the same number of proxies and cookies

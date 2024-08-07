@@ -9,10 +9,6 @@ import numpy as np
 import os
 import json
 import concurrent.futures
-from requests.exceptions import ProxyError
-import mysql.connector
-from mysql.connector import Error
-import gender_guesser.detector as gender
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,7 +22,7 @@ class CookieState:
         self.fail_count = 0
 
 class InstagramScraper:
-    def __init__(self, user_id, cookies, csv_filename):
+    def __init__(self, user_id, cookies):
         self.user_id = user_id
         self.cookie_states = [CookieState(cookie, i) for i, cookie in enumerate(cookies)]
         self.base_url = f"https://i.instagram.com/api/v1/friendships/{user_id}/followers/"
@@ -45,13 +41,10 @@ class InstagramScraper:
         self.max_retries = 3
         self.stop_event = threading.Event()
         self.max_workers = len(cookies)
-        self.db_connection = self.create_db_connection()
-        self.gender_detector = gender.Detector()
-        self.csv_filename = csv_filename
 
     def load_state(self):
-        if os.path.exists('Files/scraper_state.json'):
-            with open('Files/scraper_state.json', 'r') as f:
+        if os.path.exists('scraper_state.json'):
+            with open('scraper_state.json', 'r') as f:
                 state = json.load(f)
             self.user_id = state['user_id']
             self.cookie_states = []
@@ -79,22 +72,11 @@ class InstagramScraper:
         for cookie_state in self.cookie_states:
             try:
                 followers = self.fetch_followers(cookie_state, initial_request=True)
-                if followers:
-                    if 'next_max_id' in followers:
-                        self.base_encoded_part = followers['next_max_id'].split('|')[-1]
-                    elif 'big_list' in followers:
-                        self.base_encoded_part = str(followers.get('next_max_id', ''))
-                    else:
-                        raise ValueError("Unexpected response structure")
-                    
-                    print(f"Successfully obtained base_encoded_part: {self.base_encoded_part}")
+                if followers and 'next_max_id' in followers:
+                    self.base_encoded_part = followers['next_max_id'].split('|')[1]
                     return
-                else:
-                    print(f"No followers data for cookie {cookie_state.index + 1}")
             except Exception as e:
-                print(f"Error fetching initial followers for cookie {cookie_state.index + 1}: {e}")
-                if 'followers' in locals():
-                    print(f"Response content: {json.dumps(followers, indent=2)}")
+                print(f"Error fetching initial followers: {e}")
         raise Exception("Failed to get base encoded part from any cookie")
 
     def scrape_followers(self):
@@ -128,13 +110,8 @@ class InstagramScraper:
                     self.total_followers_scraped += len(followers['users'])
                     print(f"Total followers scraped: {self.total_followers_scraped}")
                     self.save_followers(followers['users'])
-                    if 'next_max_id' in followers:
-                        self.last_max_id = followers['next_max_id']
-                    elif 'big_list' in followers:
-                        self.last_max_id = f"{followers.get('next_max_id', '')}|{self.base_encoded_part}"
-                    else:
-                        print("No next_max_id found in response. Stopping scrape.")
-                        break
+                    if self.global_iteration >= 3:
+                        self.global_iteration += 1  # Increment for small steps
                 cookie_state.fail_count = 0  # Reset fail count on success
             else:
                 print(f"No followers returned for cookie {cookie_state.index + 1}")
@@ -208,91 +185,41 @@ class InstagramScraper:
             print("No followers to save.")
             return
 
-        self.insert_followers(followers)
-        print(f"Inserted {len(followers)} followers into the database")
+        output_dir = 'instagram_followers'
+        os.makedirs(output_dir, exist_ok=True)
 
-    def create_db_connection(self):
-        try:
-            connection = mysql.connector.connect(
-                host='127.0.0.1',
-                database='main',
-                user='root',
-                password='password'
-            )
-            return connection
-        except Error as e:
-            print(f"Error connecting to MySQL database: {e}")
-            return None
+        filename = f"{output_dir}/followers_{self.user_id}.csv"
 
-    def guess_gender(self, name):
-        name_parts = name.split()
-        if name_parts:
-            first_name = name_parts[0]
-            return self.gender_detector.get_gender(first_name)
-        return 'unknown'
+        columns_to_save = {
+            'pk': 'user_id',
+            'username': 'username',
+            'full_name': 'full_name',
+            'is_private': 'is_private',
+            'is_verified': 'is_verified',
+            'profile_pic_url': 'profile_pic_url'
+        }
 
-    def insert_followers(self, followers):
-        if not self.db_connection:
-            print("No database connection. Skipping database insert.")
-            return
+        df = pd.DataFrame(followers)
+        df_to_save = df[columns_to_save.keys()].rename(columns=columns_to_save)
 
-        cursor = self.db_connection.cursor()
-        query = """
-        INSERT INTO followers (source_account, pk, pk_id, username, full_name, is_private, fbid_v2, 
-        third_party_downloads_enabled, strong_id, profile_pic_id, profile_pic_url, is_verified, 
-        has_anonymous_profile_picture, account_badges, latest_reel_media, is_favorite, gender, csv_filename)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-        full_name = VALUES(full_name),
-        is_private = VALUES(is_private),
-        profile_pic_url = VALUES(profile_pic_url),
-        is_verified = VALUES(is_verified),
-        gender = VALUES(gender),
-        csv_filename = VALUES(csv_filename)
-        """
-        for follower in followers:
-            gender = self.guess_gender(follower.get('full_name', ''))
-            data = (
-                self.user_id,
-                follower.get('pk'),
-                follower.get('pk_id'),
-                follower.get('username'),
-                follower.get('full_name'),
-                follower.get('is_private'),
-                follower.get('fbid_v2'),
-                follower.get('third_party_downloads_enabled'),
-                follower.get('strong_id__'),
-                follower.get('profile_pic_id'),
-                follower.get('profile_pic_url'),
-                follower.get('is_verified'),
-                follower.get('has_anonymous_profile_picture'),
-                json.dumps(follower.get('account_badges')),
-                follower.get('latest_reel_media'),
-                follower.get('is_favorite'),
-                gender,
-                self.csv_filename
-            )
-            cursor.execute(query, data)
-        self.db_connection.commit()
-        cursor.close()
+        # Check if the file exists to determine whether to write headers
+        file_exists = os.path.isfile(filename)
+        
+        # Append to the CSV file without writing the index
+        df_to_save.to_csv(filename, mode='a', header=not file_exists, index=False)
+
+        print(f"Appended {len(followers)} followers to {filename}")
 
     def get_next_max_id(self):
         with self.max_id_lock:
-            if '|' in self.last_max_id:
-                # Original structure
-                parts = self.last_max_id.split('|')
-                current_count = int(parts[0])
-                if self.global_iteration < 3:
-                    next_count = (self.global_iteration + 1) * self.large_step
-                    self.global_iteration += 1
-                else:
-                    next_count = current_count + self.small_step
-                self.last_max_id = f"{next_count}|{self.base_encoded_part}"
+            if self.global_iteration < 3:
+                next_count = (self.global_iteration + 1) * self.large_step
+                self.global_iteration += 1
             else:
-                # New structure
-                if self.global_iteration < 3:
-                    self.global_iteration += 1
-                # For new structure, we don't modify last_max_id
+                current_count = int(self.last_max_id.split('|')[0])
+                next_count = current_count + self.small_step
+            
+            self.last_max_id = f"{next_count}|{self.base_encoded_part}"
             return self.last_max_id
 
     def save_state(self):
@@ -313,60 +240,19 @@ class InstagramScraper:
             'last_max_id': self.last_max_id,
             'current_cookie_index': self.current_cookie_index
         }
-        with open('Files/scraper_state.json', 'w') as f:
+        with open('scraper_state.json', 'w') as f:
             json.dump(state, f)
 
-def load_proxy_cookie_pairs():
-    with open('Files/proxy_cookie_pairs.json', 'r') as f:
-        return json.load(f)
-
-def load_accounts_to_scrape(csv_file):
-    df = pd.read_csv(csv_file)
-    if 'User ID' in df.columns:
-        return df['User ID'].tolist()
-    elif 'user_id' in df.columns:
-        return df['user_id'].tolist()
-    else:
-        raise ValueError("CSV file does not contain a 'User ID' or 'user_id' column")
-
-def parse_range(range_str):
-    start, end = map(int, range_str.split('-'))
-    return start, end + 1  # Add 1 to include the end index
-
 def main():
-    filename = input("Enter the csv you want to scrape: ")
-    proxy_cookie_pairs = load_proxy_cookie_pairs()
-    
-    # Ask for the range of proxy/cookie pairs to use
-    range_str = input("Enter the range of proxy/cookie pairs to use (e.g., 0-3): ")
-    start_index, end_index = parse_range(range_str)
-    
-    # Slice the proxy_cookie_pairs list based on the input range
-    selected_pairs = proxy_cookie_pairs[start_index:end_index]
+    user_id = "25922742395"
+    cookies = [
+        "mid=ZpZeDQAEAAHuc0IRe4KVoPgzAdLR; ig_did=36D34B39-BE6C-47C3-A307-52C8E408F81E; datr=OF6WZrvsarLn4bMSQpzdcNY7; shbid=\"1280\0547943566320\0541754224106:01f76f470a0474fbe7a0882e925071bcf8452ca7209139ee40bdb7fd08a9ddec40931021\"; shbts=\"1722688106\0547943566320\0541754224106:01f72cb78207bb65e7b518f7e9724f3761d23c065e2500878da8f95ef4077759919a5f03\"; csrftoken=Ya2bWZTCamRniAb3mLnLqX3lQZIooYII; ds_user_id=7943566320; sessionid=7943566320%3AgPttqfmrEoTzP9%3A10%3AAYdWHJ9ja6LaNFGpIdZhxzGGHsbHbUbxvjOfMEtxvQ; rur=\"LDC\0547943566320\0541754475025:01f7a4f34e41af7cd8d4a139ac1802c9368a17c591dd9b4784de6040ac1c686c35d6a61e\"; wd=459x812",
+        "id=ZgX87QAEAAHzJsaP1ApQRHDTTYNA; ig_did=CCE9277B-2C27-40A4-98EA-0FAE8B344DBC; datr=Cf0FZqbGHWV-HhICttgz3_md; fbm_124024574287414=base_domain=.instagram.com; ps_n=1; ps_l=1; ig_direct_region_hint=\"FRC\0541544968888\0541754123892:01f782b791cd71095797590a565953533138b401f9583291cbb7db9a94bf86378fae51b5\"; shbid=\"967\0541544968888\0541754399817:01f7be3b753f9c85c4936350334a958798bcb2394cf82730bf898e7d38d5a73b12a5fb6d\"; shbts=\"1722863817\0541544968888\0541754399817:01f70f32c161bb014ecebef5204863dd64640906d11e78edf298447346bed1c2c9ef2309\"; oo=v1; csrftoken=KwXZnUhcfv10igmTSKa8ue3xcuaUCQh6; ds_user_id=68656457205; sessionid=68656457205%3A8wZVoqy4Cqz6Tz%3A21%3AAYcGWBXEHJQk0_Ra4jB1CYdlJT2KJmWPqrJXMCAX0w; fbsr_124024574287414=Du4iKV-EUmPTMwOek7x-htwU6QyREmNp1hDblCsm2zk.eyJ1c2VyX2lkIjoiMTAwMDk0MzQ0OTE4ODY0IiwiY29kZSI6IkFRQU1aOFAzbnNYYklkRGR2UloySzZQSzRwR1M0QlExeUk2b210NXliblFBa3kxSklyN1pfYVM5YXpuRWcxVUZkNjZHdVhLdGlZRjV3NUZ5VGt6dnpFaXVXZE9XcWxhYmRzeWF2bUROX1dzcm9VZk90TFhyQ3I4RDhnT1JHZTFNU1JxZUNNTnA5NXdBY0ZsT0s3Zm5EQjhUUFdjX1BXNTV4cXlaV2swWjNzRk5rSmZRajlPeF9wSFZkckFObTNWNjJLcWwzRms5djFnYThlaXBidG5zU3ppZjZjQU92elhOdFVfSDN1VmNxMkZSeVRHR2JTVVlrUXBBZVN0MnBOZXRfTmNpbmI5M0dlcFk4UlhWZHZtZ2h5OWZvcTBhUUIxZUIxcmN2YnhkTVBteC0wcmtFWWxGVGJaWTdidWd0OWN2b3BDYnUyc0lkazhHdmk3T3ltNEdMaXhRIiwib2F1dGhfdG9rZW4iOiJFQUFCd3pMaXhuallCTzdDeElkNTh6ZFNiN0hRR3dhblpCNG5USm1BejU0QTZ2RTJkWkM3bXlUZUJPUjlGTDI3TkdTSVQ5cmlERXRHeEdOb2hQN3dGN2NoN2JSYVAzOUZkQnJweUZoYkxNVDJ4NjR1bTdKQ3J3RU5ybExOR1U0b21Gd1NOZHVyazJMaWI1ZkxMNWNGMTk2dWFVM2hlTzZrVk1zZEVFZDNjWkFScHI2a3ZOS21NVUZaQVE5TVpBUXdxQWczVDhYTkN2NXFVWkQiLCJhbGdvcml0aG0iOiJITUFDLVNIQTI1NiIsImlzc3VlZF9hdCI6MTcyMjk2MzczOH0; fbsr_124024574287414=Du4iKV-EUmPTMwOek7x-htwU6QyREmNp1hDblCsm2zk.eyJ1c2VyX2lkIjoiMTAwMDk0MzQ0OTE4ODY0IiwiY29kZSI6IkFRQU1aOFAzbnNYYklkRGR2UloySzZQSzRwR1M0QlExeUk2b210NXliblFBa3kxSklyN1pfYVM5YXpuRWcxVUZkNjZHdVhLdGlZRjV3NUZ5VGt6dnpFaXVXZE9XcWxhYmRzeWF2bUROX1dzcm9VZk90TFhyQ3I4RDhnT1JHZTFNU1JxZUNNTnA5NXdBY0ZsT0s3Zm5EQjhUUFdjX1BXNTV4cXlaV2swWjNzRk5rSmZRajlPeF9wSFZkckFObTNWNjJLcWwzRms5djFnYThlaXBidG5zU3ppZjZjQU92elhOdFVfSDN1VmNxMkZSeVRHR2JTVVlrUXBBZVN0MnBOZXRfTmNpbmI5M0dlcFk4UlhWZHZtZ2h5OWZvcTBhUUIxZUIxcmN2YnhkTVBteC0wcmtFWWxGVGJaWTdidWd0OWN2b3BDYnUyc0lkazhHdmk3T3ltNEdMaXhRIiwib2F1dGhfdG9rZW4iOiJFQUFCd3pMaXhuallCTzdDeElkNTh6ZFNiN0hRR3dhblpCNG5USm1BejU0QTZ2RTJkWkM3bXlUZUJPUjlGTDI3TkdTSVQ5cmlERXRHeEdOb2hQN3dGN2NoN2JSYVAzOUZkQnJweUZoYkxNVDJ4NjR1bTdKQ3J3RU5ybExOR1U0b21Gd1NOZHVyazJMaWI1ZkxMNWNGMTk2dWFVM2hlTzZrVk1zZEVFZDNjWkFScHI2a3ZOS21NVUZaQVE5TVpBUXdxQWczVDhYTkN2NXFVWkQiLCJhbGdvcml0aG0iOiJITUFDLVNIQTI1NiIsImlzc3VlZF9hdCI6MTcyMjk2MzczOH0; rur=\"LDC\05468656457205\0541754499758:01f74b9e754d177885e542a99eaccbd0c209dc0c622a68f3149f1a50e09d962c01b91462",
+        
+    ]
 
-    print(f'Selected pairs: {selected_pairs}')
-    
-    if not selected_pairs:
-        print(f"No proxy/cookie pairs found in the range {start_index}-{end_index-1}.")
-        return
-
-    print(f"Using proxy/cookie pairs {start_index} to {end_index-1}")
-
-    try:
-        accounts_to_scrape = load_accounts_to_scrape(f'Files/{filename}')
-    except ValueError as e:
-        print(f"Error loading accounts: {e}")
-        return
-
-    for user_id in accounts_to_scrape:
-        print(f"Scraping followers for user_id: {user_id}")
-        cookies = [pair['cookie'] for pair in selected_pairs]
-        scraper = InstagramScraper(user_id, cookies, filename)
-        scraper.scrape_followers()
-        print(f"Finished scraping for user_id: {user_id}")
-        if scraper.db_connection:
-            scraper.db_connection.close()
-        time.sleep(60)  # Wait for 1 minute between accounts
+    scraper = InstagramScraper(user_id, cookies)
+    scraper.scrape_followers()
 
 if __name__ == "__main__":
     main()

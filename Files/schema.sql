@@ -73,5 +73,6 @@ CREATE TABLE IF NOT EXISTS followers (
     account_badges JSON,
     latest_reel_media BIGINT,
     is_favorite BOOLEAN,
-    gender VARCHAR(20)  -- Add this line
+    gender VARCHAR(20),
+    csv_filename VARCHAR(255)
 );
