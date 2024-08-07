@@ -20,19 +20,20 @@ def create_pairs(proxies, cookies):
     random.shuffle(proxies)
     random.shuffle(cookies)
 
-    # Create pairs
-    return list(zip(proxies, cookies))
+    # Create pairs with optional random names
+    pairs = [{'proxy': proxy, 'cookie': cookie, 'name': f"Pair {i + 1}"} for i, (proxy, cookie) in enumerate(zip(proxies, cookies))]
+    return pairs
 
 def save_pairs_to_csv(pairs, output_file):
     with open(output_file, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Proxy', 'Cookie'])
-        writer.writerows(pairs)
+        writer.writerow(['Proxy', 'Cookie', 'Name'])
+        for pair in pairs:
+            writer.writerow([pair['proxy'], pair['cookie'], pair['name']])
 
 def save_pairs_to_json(pairs, output_file):
-    pairs_dict = [{'proxy': proxy, 'cookie': cookie} for proxy, cookie in pairs]
     with open(output_file, 'w') as f:
-        json.dump(pairs_dict, f, indent=2)
+        json.dump(pairs, f, indent=2)
 
 def main():
     proxies = load_proxies('Files/Webshare 10 proxies.txt')

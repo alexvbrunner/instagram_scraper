@@ -35,11 +35,12 @@ from UTILS.utils import wait_with_jitter
 import mysql.connector
 from mysql.connector import Error
 import gender_guesser.detector as gender
+import curses  # For arrow key selection
 
 def load_proxy_cookie_pairs(file_path):
     with open(file_path, 'r') as f:
         pairs = json.load(f)
-    return [(pair['proxy'], pair['cookie']) for pair in pairs]
+    return pairs
 
 def load_user_ids(file_path):
     user_ids = []
@@ -179,10 +180,42 @@ def get_followers(user_id, proxy_cookie_pairs, db_connection):
         insert_followers(db_connection, user_id, followers)
         print(f"Saved remaining followers for user {user_id}.")
 
+def select_proxy_cookie_pair(proxy_cookie_pairs):
+    def display_menu(stdscr, selected_index):
+        stdscr.clear()
+        for index, pair in enumerate(proxy_cookie_pairs):
+            name = pair.get('name', f"Pair {index + 1}")
+            prefix = "-> " if index == selected_index else "   "
+            stdscr.addstr(index, 0, f"{prefix}{name} (Proxy: {pair['proxy']})")
+        stdscr.refresh()
+
+    def main(stdscr):
+        curses.curs_set(0)
+        selected_index = 0
+        while True:
+            display_menu(stdscr, selected_index)
+            key = stdscr.getch()
+            if key == curses.KEY_UP and selected_index > 0:
+                selected_index -= 1
+            elif key == curses.KEY_DOWN and selected_index < len(proxy_cookie_pairs) - 1:
+                selected_index += 1
+            elif key == curses.KEY_ENTER or key in [10, 13]:
+                return selected_index
+
+    selected_index = curses.wrapper(main)
+    return proxy_cookie_pairs[selected_index]
+
 # Main execution
 if __name__ == "__main__":
     proxy_cookie_pairs = load_proxy_cookie_pairs('Files/proxy_cookie_pairs.json')
-    user_ids = load_user_ids('Files/user_ids.csv')
+    
+    # Select proxy/cookie pair
+    selected_pair = select_proxy_cookie_pair(proxy_cookie_pairs)
+    print(f"Selected proxy: {selected_pair['proxy']}")
+
+    # Ask user for the CSV file to load user IDs
+    csv_file = input("Enter the path to the CSV file with user IDs: ")
+    user_ids = load_user_ids(csv_file)
     
     db_connection = create_db_connection()
     if not db_connection:
@@ -191,7 +224,7 @@ if __name__ == "__main__":
 
     for user_id in user_ids:
         print(f"Processing user ID: {user_id}")
-        get_followers(user_id, proxy_cookie_pairs, db_connection)
+        get_followers(user_id, [selected_pair], db_connection)  # Use selected pair
         print(f"Finished processing user ID: {user_id}")
         print("="*50)
 
