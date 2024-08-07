@@ -1,5 +1,4 @@
 104.239.88.59:5679:dlusijcj:m2wpkk4ib1c1
-45.43.167.171:6353:dlusijcj:m2wpkk4ib1c1
 161.123.65.37:6746:dlusijcj:m2wpkk4ib1c1
 64.137.18.184:6378:dlusijcj:m2wpkk4ib1c1
 192.177.87.85:5931:dlusijcj:m2wpkk4ib1c1

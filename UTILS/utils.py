@@ -18,12 +18,16 @@ def wait_with_jitter():
         active_hours = [
             (random.randint(6, 9), random.randint(10, 12)),
             (random.randint(13, 16), random.randint(17, 19)),
-            (random.randint(19, 21), random.randint(22, 23))
+            (random.randint(19, 21), random.randint(22, 24))
         ]
         last_update_day = current_day
 
     current_hour = current_time.hour
     current_minute = current_time.minute
+
+    print(active_hours)
+    print(current_hour)
+    print(current_minute)
 
     # Check if current time is within active hours
     if not any(start <= current_hour < end for start, end in active_hours):

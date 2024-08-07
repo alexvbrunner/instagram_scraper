@@ -125,11 +125,12 @@ def get_followers(user_id, proxy_cookie_pairs, db_connection):
         pass
 
     while True:
-        wait_with_jitter()
 
         # Randomly select a (proxy, cookie) pair
         proxy, cookie = random.choice(proxy_cookie_pairs)
         print(f"Using proxy: {proxy}")
+
+        wait_with_jitter()
 
         try:
             # Parse proxy string
