@@ -14,7 +14,14 @@ def load_cookies(file_path):
             if line:
                 # Remove surrounding quotes and replace escaped quotes
                 line = line.strip("'").replace('\\"', '"')
-                cookies.append(line)
+                # Split the line into name and cookie
+                parts = line.split(' - ', 1)
+                if len(parts) == 2:
+                    name, cookie = parts
+                else:
+                    name = f"Unnamed {len(cookies) + 1}"
+                    cookie = line
+                cookies.append({'name': name, 'cookie': cookie})
         return cookies
 
 def create_pairs(proxies, cookies):
@@ -27,8 +34,8 @@ def create_pairs(proxies, cookies):
     random.shuffle(proxies)
     random.shuffle(cookies)
 
-    # Create pairs with optional random names
-    pairs = [{'proxy': proxy, 'cookie': cookie, 'name': f"Pair {i + 1}"} for i, (proxy, cookie) in enumerate(zip(proxies, cookies))]
+    # Create pairs
+    pairs = [{'proxy': proxy, 'cookie': cookie['cookie'], 'name': cookie['name']} for proxy, cookie in zip(proxies, cookies)]
     return pairs
 
 def save_pairs_to_csv(pairs, output_file):
@@ -43,7 +50,7 @@ def save_pairs_to_json(pairs, output_file):
         json.dump(pairs, f, indent=2)
 
 def main():
-    proxies = load_proxies('Files/Webshare 10 proxies.txt')
+    proxies = load_proxies('Files/proxies.txt')
     cookies = load_cookies('Files/cookies.txt')
 
     pairs = create_pairs(proxies, cookies)

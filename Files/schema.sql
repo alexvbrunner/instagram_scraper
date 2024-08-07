@@ -56,11 +56,10 @@ CREATE TABLE IF NOT EXISTS pinned_channels (
 );
 
 CREATE TABLE IF NOT EXISTS followers (
-    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(255) PRIMARY KEY,
     source_account VARCHAR(255),
     pk BIGINT,
     pk_id BIGINT,
-    username VARCHAR(255),
     full_name VARCHAR(255),
     is_private BOOLEAN,
     fbid_v2 BIGINT,
