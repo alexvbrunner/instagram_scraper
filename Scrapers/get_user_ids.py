@@ -10,7 +10,7 @@ corresponding user IDs, and saves the results to a CSV file.
 Usage:
     Ensure the following files are present:
     - 'Files/proxy_cookie_pairs.json': JSON file containing proxy and cookie pairs
-    - 'Files/input_usernames.txt': Text file with Instagram usernames or profile URLs (one per line)
+    - 'input_usernames.txt': Text file with Instagram usernames or profile URLs (one per line)
 
     Run the script to generate 'Files/user_ids.csv' with the results.
 
@@ -65,29 +65,30 @@ def get_user_id(username, proxy, cookie):
         return None
 
 def process_usernames(input_file, output_file, proxy_cookie_pairs):
-    results = []
-    
     with open(input_file, 'r') as f:
         inputs = [line.strip() for line in f if line.strip()]
-    
-    for input_string in inputs:
-        username = extract_username(input_string)
-        proxy, cookie = random.choice(proxy_cookie_pairs)
-        user_id = get_user_id(username, proxy, cookie)
-        
-        if user_id:
-            results.append((input_string, username, user_id))
-            print(f"Found user ID for {username}: {user_id}")
-        else:
-            print(f"Could not find user ID for {username}")
     
     with open(output_file, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['Input', 'Username', 'User ID'])
-        writer.writerows(results)
+        
+        for input_string in inputs:
+            username = extract_username(input_string)
+            proxy, cookie = random.choice(proxy_cookie_pairs)
+            user_id = get_user_id(username, proxy, cookie)
+            
+            if user_id:
+                writer.writerow([input_string, username, user_id])
+                print(f"Found user ID for {username}: {user_id}")
+            else:
+                writer.writerow([input_string, username, ''])
+                print(f"Could not find user ID for {username}")
+            
+            # Flush the file after each write to ensure data is saved immediately
+            f.flush()
     
     print(f"Results saved to {output_file}")
 
 if __name__ == "__main__":
     proxy_cookie_pairs = load_proxy_cookie_pairs('Files/proxy_cookie_pairs.json')
-    process_usernames('Files/input_usernames.txt', 'Files/user_ids.csv', proxy_cookie_pairs)
+    process_usernames('input_usernames.txt', 'Files/user_ids.csv', proxy_cookie_pairs)

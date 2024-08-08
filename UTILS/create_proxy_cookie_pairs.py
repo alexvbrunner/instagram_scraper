@@ -50,13 +50,10 @@ def save_pairs_to_json(pairs, output_file):
         json.dump(pairs, f, indent=2)
 
 def main():
-    proxies = load_proxies('Files/proxies.txt')
+    proxies = load_proxies('proxies.txt')
     cookies = load_cookies('Files/cookies.txt')
 
     pairs = create_pairs(proxies, cookies)
-
-    # Save pairs to CSV
-    save_pairs_to_csv(pairs, 'Files/proxy_cookie_pairs.csv')
 
     # Save pairs to JSON
     save_pairs_to_json(pairs, 'Files/proxy_cookie_pairs.json')
