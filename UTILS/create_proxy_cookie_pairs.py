@@ -2,9 +2,9 @@ import csv
 import random
 import json
 
-def load_proxies(file_path):
+def load_accounts(file_path):
     with open(file_path, 'r') as f:
-        return [line.strip() for line in f if line.strip()]
+        return json.load(f)
 
 def load_cookies(file_path):
     with open(file_path, 'r') as f:
@@ -24,39 +24,40 @@ def load_cookies(file_path):
                 cookies.append({'name': name, 'cookie': cookie})
         return cookies
 
-def create_pairs(proxies, cookies):
-    # Ensure we have the same number of proxies and cookies
-    min_length = min(len(proxies), len(cookies))
-    proxies = proxies[:min_length]
+def create_pairs(accounts, cookies):
+    # Ensure we have the same number of accounts and cookies
+    min_length = min(len(accounts), len(cookies))
+    accounts = accounts[:min_length]
     cookies = cookies[:min_length]
 
     # Shuffle both lists
-    random.shuffle(proxies)
+    random.shuffle(accounts)
     random.shuffle(cookies)
 
     # Create pairs
-    pairs = [{'proxy': proxy, 'cookie': cookie['cookie'], 'name': cookie['name']} for proxy, cookie in zip(proxies, cookies)]
+    pairs = [{'proxy': account['proxy'], 'cookie': cookie['cookie'], 'name': cookie['name'], 'user_agent': account['user_agent']} for account, cookie in zip(accounts, cookies)]
     return pairs
 
 def save_pairs_to_csv(pairs, output_file):
     with open(output_file, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Proxy', 'Cookie', 'Name'])
+        writer.writerow(['Proxy', 'Cookie', 'Name', 'User Agent'])
         for pair in pairs:
-            writer.writerow([pair['proxy'], pair['cookie'], pair['name']])
+            writer.writerow([pair['proxy'], pair['cookie'], pair['name'], pair['user_agent']])
 
 def save_pairs_to_json(pairs, output_file):
     with open(output_file, 'w') as f:
         json.dump(pairs, f, indent=2)
 
 def main():
-    proxies = load_proxies('proxies.txt')
+    accounts = load_accounts('Files/instagram_accounts.json')
     cookies = load_cookies('Files/cookies.txt')
 
-    pairs = create_pairs(proxies, cookies)
+    pairs = create_pairs(accounts, cookies)
 
     # Save pairs to JSON
     save_pairs_to_json(pairs, 'Files/proxy_cookie_pairs.json')
+    save_pairs_to_csv(pairs, 'Files/proxy_cookie_pairs.csv')
 
     print(f"Created {len(pairs)} proxy-cookie pairs.")
     print("Pairs saved to 'proxy_cookie_pairs.csv' and 'proxy_cookie_pairs.json'.")

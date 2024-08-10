@@ -1,11 +1,11 @@
 [
   {
-    "proxy": "171.22.250.45:6164:dlusijcj:m2wpkk4ib1c1",
+    "proxy": "216.173.78.193:6013:dlusijcj:m2wpkk4ib1c1",
     "cookie": "'csrftoken=LrNm8BuEeMj3sAzamngtjVua8YQT1Bnr; rur=\"HIL\\05462355910932\\0541754664633:01f70016b548545a22b60254432197d1ea7aad58f0531872c011dc9f8de241aaf504f605\"; mid=ZrTbNgALAAEOCsEJh62eDNjmLSKt; ds_user_id=62355910932; ig_did=EB9B1D13-2E70-40BF-9647-13CDCAF8AAC2; sessionid=62355910932%3AOgwV199YJMFjP9%3A28%3AAYc5m2JCou4MUu9qXQ42nZZhwdoJZNZ0jdHJvtvqPA",
     "name": "giveblood_bali"
   },
   {
-    "proxy": "216.173.78.193:6013:dlusijcj:m2wpkk4ib1c1",
+    "proxy": "171.22.250.45:6164:dlusijcj:m2wpkk4ib1c1",
     "cookie": "'csrftoken=8rlZIeA06473DxPqbVGHuHCizaGfL1Z7; rur=\"HIL\\05468470736003\\0541754664642:01f73073f83600b4a3e3a25de20ce50d1a0b1f56106de266a02396ddf086c7590035ff12\"; mid=ZrTbQAALAAHwwDhJMia7UNwWTo93; ds_user_id=68470736003; ig_did=3368273F-C817-4FBB-9BED-BB099C023A90; sessionid=68470736003%3AQoejfKsEfzmULS%3A12%3AAYfZSNzRc1nH0htBhYpi2trEe4XwIw9RIAVtS2yWMA",
     "name": "fildoesai"
   }
