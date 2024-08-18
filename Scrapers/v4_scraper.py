@@ -461,7 +461,7 @@ class InstagramScraper:
 
         # Add micro-breaks
         if random.random() < 0.05:  # 5% chance of a micro-break
-            jitter += np.random.uniform(10, 30)  # 10-30 second break
+            jitter += np.random.uniform(1, 10)  # 10-30 second break
 
         # Ensure minimum wait time
         jitter = max(jitter, 0.5)
