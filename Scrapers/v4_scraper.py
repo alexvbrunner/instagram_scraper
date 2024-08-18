@@ -69,7 +69,7 @@ class InstagramScraper:
         self.rate_limit_info = {}  # New attribute to store rate limit info
         self.available_cookies = queue.Queue()
         self.initialize_available_cookies()
-        self.cookie_check_interval = 1500  # 25 minutes in seconds
+        self.cookie_check_interval = 60  # 1 minute in seconds
         self.rate_limit_threshold = 3  # Number of suspected rate limits before backing off
         self.rate_limit_window = 600  # 10 minutes in seconds
         self.rate_limit_counts = {}  # To track rate limit hits per account
