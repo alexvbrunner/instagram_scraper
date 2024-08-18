@@ -266,11 +266,15 @@ class InstagramScraper:
                         logger.info(f"Rate limit reached for account ID {current_account_id}, switching cookie...")
                         self.increment_rate_limit_count(current_account_id)
                         self.return_cookie_to_pool(cookie_state)
-                        cookie_state = self.get_next_available_cookie()
-                        if cookie_state is None:
+                        
+                        # Try to get a new available cookie immediately
+                        new_cookie_state = self.get_next_available_cookie()
+                        if new_cookie_state is None:
                             logger.warning("No available cookies. Waiting before retry...")
-                            time.sleep(300)  # Wait for 5 minutes before checking for available cookies again
+                            time.sleep(30)  # Wait for 30 seconds before checking again
                             continue
+                        
+                        cookie_state = new_cookie_state
                         current_account_id = self.index_to_account_id[cookie_state.index]
                         logger.info(f"Switched to account ID {current_account_id}")
                         continue  # Retry the same request with the new cookie
@@ -312,9 +316,14 @@ class InstagramScraper:
                 self.return_cookie_to_pool(cookie_state)
                 logger.info(f"Putting cookie for account ID {current_account_id} back in the queue")
 
-                wait_time = self.get_dynamic_wait_time(current_account_id)
-                logger.info(f"Waiting {wait_time:.2f} seconds before next request for account ID {current_account_id}")
-                time.sleep(wait_time)
+                # Only wait if the current account is rate limited
+                if not cookie_state.can_make_request():
+                    wait_time = self.get_dynamic_wait_time(current_account_id)
+                    logger.info(f"Waiting {wait_time:.2f} seconds before next request for account ID {current_account_id}")
+                    time.sleep(wait_time)
+                else:
+                    # If the account can make a request, continue immediately
+                    continue
 
         logger.info(f"Exiting scrape_with_cookie for account ID {current_account_id}")
 
