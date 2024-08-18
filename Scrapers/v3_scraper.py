@@ -13,6 +13,7 @@ import mysql.connector
 from mysql.connector import Error
 import sys
 import gender_guesser.detector as gender
+import queue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,6 +27,19 @@ class CookieState:
         self.active = True
         self.last_request_time = 0
         self.fail_count = 0
+        self.requests_this_hour = 0
+        self.hour_start = time.time()
+
+    def can_make_request(self):
+        current_time = time.time()
+        if current_time - self.hour_start >= 3600:
+            self.requests_this_hour = 0
+            self.hour_start = current_time
+        return self.requests_this_hour < 5
+
+    def increment_request_count(self):
+        self.requests_this_hour += 1
+        self.last_request_time = time.time()
 
 class InstagramScraper:
     def __init__(self, user_id, csv_filename, use_proxies, account_data):
@@ -65,6 +79,9 @@ class InstagramScraper:
             'database': 'main'
         }
         self.gender_detector = gender.Detector()
+        self.cookie_queue = queue.Queue()
+        for cookie_state in self.cookie_states:
+            self.cookie_queue.put(cookie_state)
         print(f"Initializing scraper for user_id: {user_id}, csv_filename: {csv_filename}, use_proxies: {use_proxies}")
 
     def load_state(self):
@@ -72,15 +89,20 @@ class InstagramScraper:
             with open('Files/scraper_state.json', 'r') as f:
                 state = json.load(f)
             self.user_id = state['user_id']
-            self.cookie_states = [CookieState(
-                self.cookies,
-                self.proxy,
-                self.user_agent,
-                0
-            )]
-            self.cookie_states[0].active = state['cookie_states'][0]['active']
-            self.cookie_states[0].last_request_time = state['cookie_states'][0]['last_request_time']
-            self.cookie_states[0].fail_count = state['cookie_states'][0].get('fail_count', 0)
+            self.cookie_states = []
+            for cs in state['cookie_states']:
+                cookie_state = CookieState(
+                    cs['cookie'],
+                    cs['proxy'],
+                    cs['user_agent'],
+                    cs['index']
+                )
+                cookie_state.active = cs['active']
+                cookie_state.last_request_time = cs['last_request_time']
+                cookie_state.fail_count = cs.get('fail_count', 0)
+                cookie_state.requests_this_hour = cs.get('requests_this_hour', 0)
+                cookie_state.hour_start = cs.get('hour_start', time.time())
+                self.cookie_states.append(cookie_state)
             self.total_followers_scraped = state['followers_count']
             self.base_encoded_part = state.get('base_encoded_part')
             self.global_iteration = state.get('global_iteration', 0)
@@ -94,6 +116,11 @@ class InstagramScraper:
             self.global_iteration = 0
             self.last_max_id = "0|"
             self.current_cookie_index = 0
+
+        # Reinitialize the cookie queue
+        self.cookie_queue = queue.Queue()
+        for cookie_state in self.cookie_states:
+            self.cookie_queue.put(cookie_state)
 
     def get_base_encoded_part(self):
         for cookie_state in self.cookie_states:
@@ -136,16 +163,32 @@ class InstagramScraper:
 
         print(f"Starting scraping with {self.max_workers} workers")
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [executor.submit(self.scrape_with_cookie, cookie_state) 
-                       for cookie_state in self.cookie_states]
+            futures = [executor.submit(self.scrape_with_cookie, self.get_next_available_cookie()) 
+                       for _ in range(self.max_workers)]
             concurrent.futures.wait(futures)
 
         print("Scraping complete.")
         self.save_state()
 
+    def get_next_available_cookie(self):
+        while True:
+            try:
+                cookie_state = self.cookie_queue.get(block=False)
+                if cookie_state.can_make_request():
+                    return cookie_state
+                else:
+                    self.cookie_queue.put(cookie_state)
+                    time.sleep(1)  # Wait before checking the next cookie
+            except queue.Empty:
+                time.sleep(5)  # All cookies are rate-limited, wait before retrying
+
     def scrape_with_cookie(self, cookie_state):
         print(f"Starting scrape_with_cookie for {cookie_state.user_agent}")
         while not self.stop_event.is_set():
+            if not cookie_state.can_make_request():
+                time.sleep(60)  # Wait for a minute before checking again
+                continue
+
             next_max_id = self.get_next_max_id()
             if next_max_id is None:
                 print(f"No more max_id available for {cookie_state.user_agent}, breaking loop")
@@ -158,6 +201,7 @@ class InstagramScraper:
             followers = self.fetch_followers(cookie_state, params)
             
             if followers:
+                cookie_state.increment_request_count()
                 print(f"Successfully fetched {len(followers['users'])} followers with {cookie_state.user_agent}")
                 with self.cookie_state_lock:
                     self.followers.extend(followers['users'])
@@ -178,6 +222,8 @@ class InstagramScraper:
 
             print(f"Saving state after processing with {cookie_state.user_agent}")
             self.save_state()
+            self.cookie_queue.put(cookie_state)
+            cookie_state = self.get_next_available_cookie()
 
         print(f"Exiting scrape_with_cookie for {cookie_state.user_agent}")
 
@@ -232,9 +278,15 @@ class InstagramScraper:
 
         self.wait_with_jitter()
         for retry in range(self.max_retries):
+            if not cookie_state.can_make_request():
+                print(f"Rate limit reached for {cookie_state.user_agent}, waiting...")
+                time.sleep(60)
+                continue
+
             print(f"Attempt {retry + 1} of {self.max_retries}")
             try:
                 response = requests.get(self.base_url, params=params, headers=headers, cookies=cookies, proxies=proxies, timeout=30)
+                cookie_state.increment_request_count()
                 print(f"Request status code: {response.status_code}")
                 
                 # Calculate response size
@@ -418,7 +470,9 @@ class InstagramScraper:
                     'index': cs.index,
                     'active': cs.active,
                     'last_request_time': cs.last_request_time,
-                    'fail_count': cs.fail_count
+                    'fail_count': cs.fail_count,
+                    'requests_this_hour': cs.requests_this_hour,
+                    'hour_start': cs.hour_start
                 } for cs in self.cookie_states
             ],
             'followers_count': self.total_followers_scraped,

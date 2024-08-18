@@ -6,6 +6,8 @@ import csv
 import json
 import random
 from datetime import datetime, timedelta
+import time
+import queue
 
 def get_database_connection():
     try:
@@ -79,6 +81,29 @@ def get_user_ids_from_csv(csv_filename):
             if 'User ID' in row and row['User ID']:
                 user_ids.append(row['User ID'])
     return user_ids
+
+class CookieState:
+    def __init__(self, cookie, proxy, user_agent, index):
+        self.cookie = cookie
+        self.proxy = proxy
+        self.user_agent = user_agent
+        self.index = index
+        self.active = True
+        self.last_request_time = 0
+        self.fail_count = 0
+        self.requests_this_hour = 0
+        self.hour_start = time.time()
+
+    def can_make_request(self):
+        current_time = time.time()
+        if current_time - self.hour_start >= 3600:
+            self.requests_this_hour = 0
+            self.hour_start = current_time
+        return self.requests_this_hour < 5
+
+    def increment_request_count(self):
+        self.requests_this_hour += 1
+        self.last_request_time = time.time()
 
 def main():
     connection = get_database_connection()
