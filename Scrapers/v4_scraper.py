@@ -426,21 +426,21 @@ class InstagramScraper:
         return None
 
     def wait_with_jitter(self):
-        activity_type = random.choices(['quick', 'normal', 'engaged'], weights=[0.3, 0.5, 0.2])[0]
+        activity_type = random.choices(['quick', 'normal', 'engaged'], weights=[0.5, 0.3, 0.2])[0]
         
         if activity_type == 'quick':
-            jitter = np.random.exponential(scale=2)
+            jitter = np.random.exponential(scale=1)
         elif activity_type == 'normal':
-            jitter = np.random.normal(loc=10, scale=5)
+            jitter = np.random.normal(loc=3, scale=1)
         else:  # engaged
-            jitter = np.random.normal(loc=30, scale=10)
+            jitter = np.random.normal(loc=5, scale=2)
 
         # Add micro-breaks
-        if random.random() < 0.1:  # 10% chance of a micro-break
-            jitter += np.random.uniform(60, 300)  # 1-5 minute break
+        if random.random() < 0.05:  # 5% chance of a micro-break
+            jitter += np.random.uniform(10, 30)  # 10-30 second break
 
         # Ensure minimum wait time
-        jitter = max(jitter, 1)
+        jitter = max(jitter, 0.5)
 
         logger.info(f"Waiting for {jitter:.2f} seconds.")
         time.sleep(jitter)
