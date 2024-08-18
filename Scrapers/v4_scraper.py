@@ -47,7 +47,7 @@ class InstagramScraper:
         self.account_data = json.loads(account_data)
         self.db_config = json.loads(db_config)
         self.base_url = f"https://i.instagram.com/api/v1/friendships/{self.user_id}/followers/"
-        self.params = {"count": 200, "search_surface": "follow_list_page"}
+        self.params = {"count": 25, "search_surface": "follow_list_page"}
         self.cookie_queue = queue.Queue()
         self.cookie_states = self.initialize_cookie_states()
         self.max_workers = len(self.account_data)
@@ -205,10 +205,35 @@ class InstagramScraper:
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = [executor.submit(self.scrape_with_cookie, self.get_next_available_cookie()) 
                     for _ in range(self.max_workers)]
-            concurrent.futures.wait(futures)
+            
+            save_interval = 100  # Save state every 100 followers
+            last_save_time = time.time()
+            save_time_interval = 300  # Save state every 5 minutes (300 seconds)
+
+            try:
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
+                    
+                    # Save state based on number of followers scraped
+                    if self.total_followers_scraped % save_interval == 0:
+                        self.save_state()
+                        logger.info(f"State saved after scraping {self.total_followers_scraped} followers")
+                    
+                    # Save state based on time interval
+                    current_time = time.time()
+                    if current_time - last_save_time >= save_time_interval:
+                        self.save_state()
+                        logger.info(f"State saved after {save_time_interval} seconds")
+                        last_save_time = current_time
+
+            except Exception as e:
+                logger.error(f"Error in scrape_followers: {str(e)}")
+                logger.error(traceback.format_exc())
+            finally:
+                self.save_state()  # Save state one last time before exiting
 
         logger.info("Scraping complete.")
-        self.save_state()
+        self.save_state()  # Final save after all scraping is done
 
     def scrape_with_cookie(self, initial_cookie_state):
         cookie_state = initial_cookie_state
@@ -568,6 +593,28 @@ class InstagramScraper:
         logger.info(f"Success rate: {success_rate:.2%}")
         logger.info(f"Rate limit info: {self.rate_limit_info}")
         logger.info(f"Rate limit counts: {self.rate_limit_counts}")
+
+    def check_and_update_cookie(self, cookie_state):
+        account_id = self.index_to_account_id[cookie_state.index]
+        logger.info(f"Checking for new cookie for account ID {account_id}")
+        new_cookie = self.get_new_cookie_from_db(account_id, cookie_state.cookie)
+        if new_cookie and new_cookie != cookie_state.cookie:
+            logger.info(f"New cookie found for account ID {account_id}. Updating.")
+            new_cookie_state = CookieState(
+                new_cookie,
+                cookie_state.proxy,
+                cookie_state.user_agent,
+                cookie_state.index
+            )
+            new_cookie_state.active = True
+            new_cookie_state.fail_count = 0
+            new_cookie_state.requests_this_hour = 0
+            new_cookie_state.hour_start = time.time()
+            new_cookie_state.last_cookie_check = time.time()
+            return new_cookie_state
+        else:
+            logger.info(f"No new cookie found for account ID {account_id}")
+            return cookie_state
 
 def main():
     import sys
