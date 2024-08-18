@@ -254,6 +254,7 @@ class InstagramScraper:
                     last_cookie_check = time.time()
 
                 with self.request_lock:
+                    self.check_and_update_cookie(cookie_state)
                     current_max_id = self.get_next_max_id()
                     logger.info(f"scrape_with_cookie: Retrieved current_max_id: {current_max_id} for account ID {current_account_id}")
 
