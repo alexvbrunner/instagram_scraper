@@ -40,6 +40,7 @@ def get_random_user_agent():
 def add_account():
     username = input("Enter Instagram username: ")
     password = input("Enter Instagram password: ")
+    totp_secret = input("Enter 2FA secret (if applicable, otherwise press Enter): ")
     
     accounts = load_accounts()
     proxies = load_proxies()
@@ -47,7 +48,10 @@ def add_account():
     if not any(acc['username'] == username for acc in accounts):
         proxy = proxies[len(accounts) % len(proxies)] if proxies else None
         user_agent = get_random_user_agent()
-        accounts.append({"username": username, "password": password, "proxy": proxy, "user_agent": user_agent})
+        account = {"username": username, "password": password, "proxy": proxy, "user_agent": user_agent}
+        if totp_secret:
+            account["totp_secret"] = totp_secret
+        accounts.append(account)
         save_accounts(accounts)
         print(f"Account {username} added successfully.")
     else:
@@ -65,12 +69,16 @@ def add_accounts_from_file(file_path):
     with open(file_path, 'r') as f:
         for line in f:
             parts = line.strip().split()
-            if len(parts) == 2:
-                username, password = parts
+            if len(parts) >= 2:
+                username, password = parts[:2]
+                totp_secret = ' '.join(parts[2:]) if len(parts) > 2 else None
                 if username not in existing_usernames:
                     proxy = proxies[len(accounts) % len(proxies)] if proxies else None
                     user_agent = get_random_user_agent()
-                    accounts.append({"username": username, "password": password, "proxy": proxy, "user_agent": user_agent})
+                    account = {"username": username, "password": password, "proxy": proxy, "user_agent": user_agent}
+                    if totp_secret:
+                        account["totp_secret"] = totp_secret
+                    accounts.append(account)
                     existing_usernames.add(username)
     
     save_accounts(accounts)
@@ -82,7 +90,10 @@ def view_accounts():
         print("No accounts found.")
     else:
         for i, account in enumerate(accounts, 1):
-            print(f"{i}. Username: {account['username']}, Proxy: {account.get('proxy', 'None')}, User Agent: {account.get('user_agent', 'None')}")
+            print(f"{i}. Username: {account['username']}, "
+                  f"Proxy: {account.get('proxy', 'None')}, "
+                  f"User Agent: {account.get('user_agent', 'None')}, "
+                  f"2FA Secret: {'Yes' if 'totp_secret' in account else 'No'}")
 
 def main():
     while True:

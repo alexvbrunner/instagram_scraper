@@ -18,20 +18,30 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class CookieState:
-    def __init__(self, cookie, proxy, name, index):
+    def __init__(self, cookie, proxy, user_agent, index):
         self.cookie = cookie
         self.proxy = proxy
-        self.name = name
+        self.user_agent = user_agent
         self.index = index
         self.active = True
         self.last_request_time = 0
         self.fail_count = 0
 
 class InstagramScraper:
-    def __init__(self, user_id, csv_filename):
+    def __init__(self, user_id, csv_filename, use_proxies, account_data):
+        print('Initializing scraper')
         self.user_id = user_id
         self.csv_filename = csv_filename
-        self.cookie_states = self.load_proxy_cookie_pairs()
+        self.use_proxies = use_proxies == 'yes'
+        self.account_data = account_data
+        self.cookie_states = []
+        for idx, account in enumerate(account_data):
+            proxy_url = f"{account['proxy_username']}:{account['proxy_password']}@{account['proxy_address']}:{account['proxy_port']}"
+            self.cookie_states.append(CookieState(account['cookies'], proxy_url, account['user_agent'], idx))
+        
+        if not self.cookie_states:
+            raise ValueError("No valid accounts found. Cannot proceed with scraping.")
+        
         self.base_url = f"https://i.instagram.com/api/v1/friendships/{user_id}/followers/"
         self.params = {'count': 25}
         self.followers = []
@@ -55,24 +65,22 @@ class InstagramScraper:
             'database': 'main'
         }
         self.gender_detector = gender.Detector()
-
-    def load_proxy_cookie_pairs(self):
-        with open('Files/proxy_cookie_pairs.json', 'r') as f:
-            pairs = json.load(f)
-        return [CookieState(pair['cookie'], pair['proxy'], pair['name'], i) for i, pair in enumerate(pairs)]
+        print(f"Initializing scraper for user_id: {user_id}, csv_filename: {csv_filename}, use_proxies: {use_proxies}")
 
     def load_state(self):
         if os.path.exists('Files/scraper_state.json'):
             with open('Files/scraper_state.json', 'r') as f:
                 state = json.load(f)
             self.user_id = state['user_id']
-            self.cookie_states = []
-            for cs in state['cookie_states']:
-                cookie_state = CookieState(cs['cookie'], cs['proxy'], cs['name'], cs['index'])
-                cookie_state.active = cs['active']
-                cookie_state.last_request_time = cs['last_request_time']
-                cookie_state.fail_count = cs.get('fail_count', 0)
-                self.cookie_states.append(cookie_state)
+            self.cookie_states = [CookieState(
+                self.cookies,
+                self.proxy,
+                self.user_agent,
+                0
+            )]
+            self.cookie_states[0].active = state['cookie_states'][0]['active']
+            self.cookie_states[0].last_request_time = state['cookie_states'][0]['last_request_time']
+            self.cookie_states[0].fail_count = state['cookie_states'][0].get('fail_count', 0)
             self.total_followers_scraped = state['followers_count']
             self.base_encoded_part = state.get('base_encoded_part')
             self.global_iteration = state.get('global_iteration', 0)
@@ -85,12 +93,12 @@ class InstagramScraper:
             self.total_followers_scraped = 0
             self.global_iteration = 0
             self.last_max_id = "0|"
-            self.current_cookie_index = -1
+            self.current_cookie_index = 0
 
     def get_base_encoded_part(self):
         for cookie_state in self.cookie_states:
             try:
-                print(f"Attempting to fetch initial followers with {cookie_state.name}")
+                print(f"Attempting to fetch initial followers with {cookie_state.user_agent}")
                 followers = self.fetch_followers(cookie_state, initial_request=True)
                 if followers:
                     print(f"Received response: {json.dumps(followers, indent=2)}")
@@ -110,9 +118,9 @@ class InstagramScraper:
                     else:
                         print("'next_max_id' not found in response")
                 else:
-                    print(f"No followers data returned for {cookie_state.name}")
+                    print(f"No followers data returned for {cookie_state.user_agent}")
             except Exception as e:
-                print(f"Error fetching initial followers with {cookie_state.name}: {str(e)}")
+                print(f"Error fetching initial followers with {cookie_state.user_agent}: {str(e)}")
                 print(f"Exception details: {type(e).__name__}")
                 import traceback
                 traceback.print_exc()
@@ -120,10 +128,13 @@ class InstagramScraper:
         raise Exception("Failed to get base encoded part from any cookie")
 
     def scrape_followers(self):
+        print("Starting scrape_followers method")
         self.load_state()
         if not self.base_encoded_part:
+            print("Base encoded part not found, fetching it now")
             self.get_base_encoded_part()
 
+        print(f"Starting scraping with {self.max_workers} workers")
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = [executor.submit(self.scrape_with_cookie, cookie_state) 
                        for cookie_state in self.cookie_states]
@@ -133,18 +144,21 @@ class InstagramScraper:
         self.save_state()
 
     def scrape_with_cookie(self, cookie_state):
+        print(f"Starting scrape_with_cookie for {cookie_state.user_agent}")
         while not self.stop_event.is_set():
             next_max_id = self.get_next_max_id()
             if next_max_id is None:
+                print(f"No more max_id available for {cookie_state.user_agent}, breaking loop")
                 break
 
-            print(f"Fetching with {cookie_state.name}, max_id: {next_max_id}")
+            print(f"Fetching with {cookie_state.user_agent}, max_id: {next_max_id}")
             
             params = self.params.copy()
             params['max_id'] = next_max_id
             followers = self.fetch_followers(cookie_state, params)
             
             if followers:
+                print(f"Successfully fetched {len(followers['users'])} followers with {cookie_state.user_agent}")
                 with self.cookie_state_lock:
                     self.followers.extend(followers['users'])
                     self.total_followers_scraped += len(followers['users'])
@@ -153,58 +167,109 @@ class InstagramScraper:
                     if self.global_iteration >= 3:
                         self.global_iteration += 1  # Increment for small steps
                 cookie_state.fail_count = 0  # Reset fail count on success
+                print(f"Cumulative followers scraped: {self.total_followers_scraped}")
             else:
-                print(f"No followers returned for {cookie_state.name}")
+                print(f"No followers returned for {cookie_state.user_agent}, fail count: {cookie_state.fail_count}")
                 cookie_state.fail_count += 1
                 if cookie_state.fail_count >= 3:
                     cookie_state.active = False
-                    print(f"Deactivating {cookie_state.name} due to repeated failures.")
+                    print(f"Deactivating {cookie_state.user_agent} due to repeated failures.")
                     break
 
+            print(f"Saving state after processing with {cookie_state.user_agent}")
             self.save_state()
 
+        print(f"Exiting scrape_with_cookie for {cookie_state.user_agent}")
+
     def fetch_followers(self, cookie_state, params=None, initial_request=False):
+        print(f"Entering fetch_followers for {cookie_state.user_agent}, initial_request: {initial_request}")
         if params is None:
             params = self.params.copy()
-    
+
+        # Updated mobile user agent (Instagram v275.0.0.27.98)
         headers = {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 12_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 105.0.0.11.118 (iPhone11,8; iOS 12_3_1; en_US; en-US; scale=2.00; 828x1792; 165586599)',
-            'Cookie': cookie_state.cookie
+            'User-Agent': 'Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; samsung; SM-G991B; o1s; exynos2100; en_US; 458229258)',
+            'Accept-Language': 'en-US',
+            'Accept-Encoding': 'gzip, deflate',
+            'X-IG-Capabilities': '3brTvw==',
+            'X-IG-Connection-Type': 'WIFI',
+            'X-IG-App-ID': '567067343352427',
         }
 
-        # Parse the proxy string
-        proxy_parts = cookie_state.proxy.split(':')
-        if len(proxy_parts) == 4:
-            proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
-        else:
-            proxy_url = f"http://{cookie_state.proxy}"
+        # Parse cookies string into a dictionary
+        cookies = {}
+        for cookie in cookie_state.cookie.split(';'):
+            if '=' in cookie:
+                name, value = cookie.strip().split('=', 1)
+                cookies[name] = value
 
-        proxies = {
-            'http': proxy_url,
-            'https': proxy_url
-        }
+        print("Using headers:")
+        for key, value in headers.items():
+            print(f"{key}: {value}")
+
+        print("Using cookies:")
+        for key, value in cookies.items():
+            masked_value = value[:4] + '*' * (len(value) - 4) if len(value) > 4 else value
+            print(f"{key}: {masked_value}")
+
+        proxies = None
+        if self.use_proxies:
+            proxy_parts = cookie_state.proxy.split('@')
+            if len(proxy_parts) == 2:
+                auth, address = proxy_parts
+                username, password = auth.split(':')
+                host, port = address.split(':')
+                proxy_url = f"http://{username}:{password}@{host}:{port}"
+                proxies = {'http': proxy_url, 'https': proxy_url}
+            else:
+                print(f"Invalid proxy format: {cookie_state.proxy}")
 
         print(f"Sending request to {self.base_url} with params: {params}")
-        print(f"Using proxy: {proxy_url}")
+        if self.use_proxies:
+            print(f"Using proxy: {proxies}")
+        else:
+            print("Not using proxy")
 
         self.wait_with_jitter()
-        for _ in range(self.max_retries):
+        for retry in range(self.max_retries):
+            print(f"Attempt {retry + 1} of {self.max_retries}")
             try:
-                response = requests.get(self.base_url, params=params, headers=headers, proxies=proxies)
+                response = requests.get(self.base_url, params=params, headers=headers, cookies=cookies, proxies=proxies, timeout=30)
+                print(f"Request status code: {response.status_code}")
+                
+                # Calculate response size
+                response_size = len(response.content)
+                print(f"Response size: {response_size} bytes")
+                
+                # Calculate headers size
+                headers_size = len('\r\n'.join(f'{k}: {v}' for k, v in response.headers.items()))
+                print(f"Headers size: {headers_size} bytes")
+                
+                # Calculate total size
+                total_size = response_size + headers_size
+                print(f"Total size: {total_size} bytes")
+                
                 response.raise_for_status()
                 data = response.json()
-                                
+                
+                print(f"Successfully fetched data")
+                print(f"Response data: {json.dumps(data, indent=2)}")
+                
                 cookie_state.last_request_time = time.time()
                 
                 if 'users' not in data or not data['users']:
-                    print(f"No followers found in response for {cookie_state.name}")
+                    print(f"No followers found in response")
                     return None
 
+                print(f"Fetched {len(data['users'])} followers")
                 return data
+            except requests.exceptions.Timeout:
+                print(f"Request timed out")
             except requests.exceptions.HTTPError as e:
                 print(f"HTTP Error: {e}")
+                print(f"Response content: {e.response.content}")
                 if e.response.status_code in [400, 429]:
-                    print(f"Error {e.response.status_code}: Possible rate limit for {cookie_state.name}. Current max_id: {params.get('max_id')}")
+                    print(f"Error {e.response.status_code}: Possible rate limit. Current max_id: {params.get('max_id')}")
                     return None
             except requests.exceptions.RequestException as e:
                 print(f"Request Exception: {e}")
@@ -216,7 +281,7 @@ class InstagramScraper:
             print(f"Retrying in 5 seconds...")
             time.sleep(5)  # Wait before retrying
         
-        print(f"Max retries reached for {cookie_state.name}")
+        print(f"Max retries reached")
         return None
 
     def wait_with_jitter(self):
@@ -247,6 +312,7 @@ class InstagramScraper:
         return 'unknown'
 
     def save_followers(self, followers):
+        print(f"Entering save_followers method with {len(followers)} followers")
         if not followers:
             print("No followers to save.")
             return
@@ -319,6 +385,7 @@ class InstagramScraper:
                 connection.close()
 
     def get_next_max_id(self):
+        print("Entering get_next_max_id method")
         with self.max_id_lock:
             if '|' in self.last_max_id:
                 current_count = int(self.last_max_id.split('|')[0])
@@ -336,16 +403,18 @@ class InstagramScraper:
             else:
                 self.last_max_id = str(next_count)
             
+            print(f"Generated next max_id: {self.last_max_id}")
             return self.last_max_id
 
     def save_state(self):
+        print("Saving current state")
         state = {
             'user_id': self.user_id,
             'cookie_states': [
                 {
                     'cookie': cs.cookie,
                     'proxy': cs.proxy,
-                    'name': cs.name,
+                    'user_agent': cs.user_agent,
                     'index': cs.index,
                     'active': cs.active,
                     'last_request_time': cs.last_request_time,
@@ -360,16 +429,28 @@ class InstagramScraper:
         }
         with open('Files/scraper_state.json', 'w') as f:
             json.dump(state, f)
+        print("State saved successfully")
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python v3_scraper.py <user_id> <csv_filename>")
+    print("Entering main function")
+    if len(sys.argv) != 5:
+        print("Usage: python v3_scraper.py <user_id> <csv_filename> <use_proxies> <account_data_json>")
         sys.exit(1)
 
-    user_id = sys.argv[1]
-    csv_filename = sys.argv[2]
-    scraper = InstagramScraper(user_id, csv_filename)
-    scraper.scrape_followers()
+    user_id, csv_filename, use_proxies, account_data_json = sys.argv[1:]
+    account_data = json.loads(account_data_json)
+
+    print(f"Starting scraper with user_id: {user_id}, csv_filename: {csv_filename}, use_proxies: {use_proxies}")
+    try:
+        scraper = InstagramScraper(user_id, csv_filename, use_proxies, account_data)
+        scraper.scrape_followers()
+        print("Scraping process completed")
+    except ValueError as ve:
+        print(f"Error initializing scraper: {str(ve)}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"An error occurred during scraping: {str(e)}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
