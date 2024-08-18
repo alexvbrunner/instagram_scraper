@@ -1,5 +1,4 @@
 import mysql.connector
-import subprocess
 import sys
 from mysql.connector import Error
 import csv
@@ -8,6 +7,17 @@ import random
 from datetime import datetime, timedelta
 import time
 import queue
+import traceback
+import logging
+import os
+
+# Add the Scrapers directory to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from Scrapers.v4_scraper import main as v4_scraper_main
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 def get_database_connection():
     try:
@@ -64,7 +74,7 @@ def get_accounts_from_database(connection):
 
 def get_proxy_preference():
     while True:
-        choice = input("Do you want to use proxies? (yes/no): ").lower()
+        choice = 'y'
         if choice in ['yes', 'y']:
             return 'yes'
         elif choice in ['no', 'n']:
@@ -111,11 +121,11 @@ def main():
     connection.close()
 
     if not accounts:
-        print("No accounts found in the database with Instagram created and valid cookies.")
+        logger.error("No accounts found in the database with Instagram created and valid cookies.")
         sys.exit(1)
 
     total_accounts = len(accounts)
-    print(f"Total available accounts: {total_accounts}")
+    logger.info(f"Total available accounts: {total_accounts}")
 
     while True:
         try:
@@ -123,9 +133,9 @@ def main():
             if 1 <= num_accounts <= total_accounts:
                 break
             else:
-                print(f"Please enter a number between 1 and {total_accounts}.")
+                logger.error(f"Please enter a number between 1 and {total_accounts}.")
         except ValueError:
-            print("Please enter a valid number.")
+            logger.error("Please enter a valid number.")
 
     # Randomly select the specified number of accounts
     selected_accounts = random.sample(accounts, num_accounts)
@@ -136,21 +146,29 @@ def main():
     user_ids = get_user_ids_from_csv(csv_filename)
 
     if not user_ids:
-        print(f"No valid user IDs found in {csv_filename}.csv. Please check the file format.")
+        logger.error(f"No valid user IDs found in {csv_filename}.csv. Please check the file format.")
         sys.exit(1)
 
-    print(f"Found {len(user_ids)} user IDs to scrape.")
+    logger.info(f"Found {len(user_ids)} user IDs to scrape.")
 
     # Randomize the order of user IDs
     random.shuffle(user_ids)
 
+    db_config = {
+        'host': '127.0.0.1',
+        'user': 'root',
+        'password': 'password',
+        'database': 'main'
+    }
+
     for user_id in user_ids:
-        print(f"Scraping followers for User ID: {user_id}")
+        logger.info(f"Scraping followers for User ID: {user_id}")
         
-        # Prepare account data for v3_scraper.py
+        # Prepare account data for v4_scraper.py
         account_data = []
         for account in selected_accounts:
             account_data.append({
+                'id': account['id'],
                 'proxy_address': account['proxy_address'],
                 'proxy_port': account['proxy_port'],
                 'proxy_username': account['proxy_username'],
@@ -159,24 +177,44 @@ def main():
                 'user_agent': account['user_agent']
             })
         
-        # Run v3_scraper.py with the current user ID and selected account information
+        # Call v4_scraper main function directly
         try:
-            subprocess.run([
-                sys.executable, 
-                "Scrapers/v3_scraper.py", 
+            # Print the IDs of the accounts being used
+            account_ids = [account['id'] for account in account_data]
+            logger.info(f"Using accounts with IDs: {', '.join(map(str, account_ids))}")
+            
+            account_data_json = json.dumps(account_data)
+            db_config_json = json.dumps(db_config)
+            
+            # Prepare arguments for v4_scraper main function
+            v4_scraper_args = [
                 str(user_id),
                 csv_filename,
-                use_proxies,
-                json.dumps(account_data)
-            ], check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"Error occurred while scraping User ID {user_id}: {e}")
+                account_data_json,
+                db_config_json
+            ]
+            
+            logger.info(f"Calling v4_scraper main function with arguments: {v4_scraper_args}")
+            
+            # Temporarily replace sys.argv with our arguments
+            original_argv = sys.argv
+            sys.argv = ['v4_scraper.py'] + v4_scraper_args
+            
+            # Call v4_scraper main function
+            v4_scraper_main()
+            
+            # Restore original sys.argv
+            sys.argv = original_argv
+            
+        except Exception as e:
+            logger.error(f"Error occurred while scraping User ID {user_id}: {str(e)}")
+            logger.error(traceback.format_exc())
             continue
 
-        print(f"Finished scraping for User ID: {user_id}")
-        print("-" * 50)
+        logger.info(f"Finished scraping for User ID: {user_id}")
+        logger.info("-" * 50)
 
-    print("Scraping process completed for all user IDs.")
+    logger.info("Scraping process completed for all user IDs.")
 
 if __name__ == "__main__":
     main()
