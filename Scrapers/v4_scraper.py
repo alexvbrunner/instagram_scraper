@@ -207,10 +207,14 @@ class InstagramScraper:
             save_interval = 100  # Save state every 100 followers
             last_save_time = time.time()
             save_time_interval = 300  # Save state every 5 minutes (300 seconds)
+            last_status_log_time = time.time()
+            status_log_interval = 60  # Log account status every 1 minute
 
             try:
                 for future in concurrent.futures.as_completed(futures):
                     future.result()
+                    
+                    current_time = time.time()
                     
                     # Save state based on number of followers scraped
                     if self.total_followers_scraped % save_interval == 0:
@@ -218,11 +222,15 @@ class InstagramScraper:
                         logger.info(f"State saved after scraping {self.total_followers_scraped} followers")
                     
                     # Save state based on time interval
-                    current_time = time.time()
                     if current_time - last_save_time >= save_time_interval:
                         self.save_state()
                         logger.info(f"State saved after {save_time_interval} seconds")
                         last_save_time = current_time
+
+                    # Log account status
+                    if current_time - last_status_log_time >= status_log_interval:
+                        self.log_account_status()
+                        last_status_log_time = current_time
 
             except Exception as e:
                 logger.error(f"Error in scrape_followers: {str(e)}")
@@ -284,6 +292,8 @@ class InstagramScraper:
 
                     logger.info(f"Cumulative followers scraped: {self.total_followers_scraped}")
                     logger.info(f"Cumulative unique followers scraped: {len(self.unique_followers)}")
+
+                    self.monitor_performance()
 
                     if 'next_max_id' in followers:
                         self.update_max_id(followers['next_max_id'])
@@ -589,6 +599,42 @@ class InstagramScraper:
         logger.info(f"Success rate: {success_rate:.2%}")
         logger.info(f"Rate limit info: {self.rate_limit_info}")
         logger.info(f"Rate limit counts: {self.rate_limit_counts}")
+
+        # Display available and rate-limited accounts
+        available_accounts = []
+        rate_limited_accounts = []
+        current_time = time.time()
+
+        for cs in self.cookie_states:
+            account_id = self.index_to_account_id[cs.index]
+            if cs.can_make_request():
+                available_accounts.append(account_id)
+            else:
+                time_until_available = 300 - (current_time - cs.last_request_time)
+                rate_limited_accounts.append((account_id, time_until_available))
+
+        logger.info(f"Available accounts: {', '.join(map(str, available_accounts))}")
+        logger.info("Rate-limited accounts:")
+        for account_id, time_until_available in rate_limited_accounts:
+            logger.info(f"  Account ID {account_id}: {time_until_available:.2f} seconds until available")
+
+    def log_account_status(self):
+        available_accounts = []
+        rate_limited_accounts = []
+        current_time = time.time()
+
+        for cs in self.cookie_states:
+            account_id = self.index_to_account_id[cs.index]
+            if cs.can_make_request():
+                available_accounts.append(account_id)
+            else:
+                time_until_available = 300 - (current_time - cs.last_request_time)
+                rate_limited_accounts.append((account_id, time_until_available))
+
+        logger.info(f"Available accounts: {', '.join(map(str, available_accounts))}")
+        logger.info("Rate-limited accounts:")
+        for account_id, time_until_available in rate_limited_accounts:
+            logger.info(f"  Account ID {account_id}: {time_until_available:.2f} seconds until available")
 
     def check_and_update_cookie(self, cookie_state):
         account_id = self.index_to_account_id[cookie_state.index]
