@@ -103,11 +103,8 @@ class InstagramScraper:
         return self.current_max_id
 
     def update_max_id(self, new_max_id):
-        if new_max_id != self.current_max_id:
-            self.current_max_id = new_max_id
-            logger.info(f"update_max_id: Updated current_max_id to: {new_max_id}")
-        else:
-            logger.info(f"update_max_id: Max ID {new_max_id} already in use, not updating")
+        self.current_max_id = new_max_id
+        logger.info(f"update_max_id: Updated current_max_id to: {new_max_id}")
 
     def get_new_cookie_from_db(self, account_id, old_cookie):
         try:
@@ -244,74 +241,65 @@ class InstagramScraper:
 
         while not self.stop_event.is_set():
             try:
-                # Check for new cookie every 25 minutes
                 if time.time() - last_cookie_check > self.cookie_check_interval:
-                    updated_cookie_state = self.check_and_update_cookie(cookie_state)
-                    if updated_cookie_state != cookie_state:
-                        logger.info(f"New cookie found for account ID {current_account_id}. Updating.")
-                        cookie_state = updated_cookie_state
+                    cookie_state = self.check_and_update_cookie(cookie_state)
                     last_cookie_check = time.time()
 
-                if not cookie_state.can_make_request():
-                    logger.info(f"Rate limit reached for account ID {current_account_id}, waiting...")
-                    time.sleep(300)  # Wait for 5 minutes before checking again
-                    continue
-
                 with self.request_lock:
-                    next_max_id = self.get_next_max_id()
-                    logger.info(f"scrape_with_cookie: Retrieved next_max_id: {next_max_id} for account ID {current_account_id}")
+                    current_max_id = self.get_next_max_id()
+                    logger.info(f"scrape_with_cookie: Retrieved current_max_id: {current_max_id} for account ID {current_account_id}")
 
-                    logger.info(f"Fetching with account ID {current_account_id}, max_id: {next_max_id}")
-                    
                     params = self.params.copy()
-                    params['max_id'] = next_max_id
+                    params['max_id'] = current_max_id
                     followers = self.fetch_followers(cookie_state, params)
-                    
-                    if followers is None:
-                        logger.info(f"No followers returned for account ID {current_account_id}, max_id: {next_max_id}")
+
+                    if followers == "RATE_LIMITED":
+                        logger.info(f"Rate limit reached for account ID {current_account_id}, switching cookie...")
                         self.increment_rate_limit_count(current_account_id)
-                        if self.should_backoff(current_account_id):
-                            logger.warning(f"Rate limit threshold reached for account ID {current_account_id}. Backing off.")
-                            time.sleep(300)  # 5 minute backoff
-                            self.reset_rate_limit_count(current_account_id)
-                        continue
-                    
-                    logger.info(f"Successfully fetched followers for account ID {current_account_id}, max_id: {next_max_id}")
-                    
-                    # Save followers to database immediately after each successful request
+                        self.return_cookie_to_pool(cookie_state)
+                        cookie_state = self.get_next_available_cookie()
+                        if cookie_state is None:
+                            logger.warning("No available cookies. Waiting before retry...")
+                            time.sleep(300)  # Wait for 5 minutes before checking for available cookies again
+                            continue
+                        current_account_id = self.index_to_account_id[cookie_state.index]
+                        logger.info(f"Switched to account ID {current_account_id}")
+                        continue  # Retry the same request with the new cookie
+                    elif followers is None:
+                        logger.info(f"No followers returned for account ID {current_account_id}, max_id: {current_max_id}")
+                        break  # End scraping if we get no followers
+
+                    logger.info(f"Successfully fetched followers for account ID {current_account_id}, max_id: {current_max_id}")
+
                     self.save_followers(followers['users'])
-                    
-                    with self.cookie_state_lock:
-                        new_followers = [follower['username'] for follower in followers['users']]
-                        self.unique_followers.update(new_followers)
-                        self.followers.extend(followers['users'])
-                        self.total_followers_scraped += len(followers['users'])
-                        logger.info(f"Total followers scraped: {self.total_followers_scraped}")
-                        logger.info(f"Unique followers scraped: {len(self.unique_followers)}")
-                        if self.global_iteration >= 3:
-                            self.global_iteration += 1  # Increment for small steps
-                    
+
+                    new_followers = [follower['username'] for follower in followers['users']]
+                    self.unique_followers.update(new_followers)
+                    self.followers.extend(followers['users'])
+                    self.total_followers_scraped += len(followers['users'])
+                    logger.info(f"Total followers scraped: {self.total_followers_scraped}")
+                    logger.info(f"Unique followers scraped: {len(self.unique_followers)}")
+                    if self.global_iteration >= 3:
+                        self.global_iteration += 1  # Increment for small steps
+
                     logger.info(f"Cumulative followers scraped: {self.total_followers_scraped}")
                     logger.info(f"Cumulative unique followers scraped: {len(self.unique_followers)}")
-                    
-                    # Check if we've reached the end of the followers list
+
                     if 'next_max_id' in followers:
                         self.update_max_id(followers['next_max_id'])
                     else:
+                        # If no next_max_id is provided, we'll increment it ourselves
+                        new_max_id = str(int(current_max_id) + self.params['count'])
+                        self.update_max_id(new_max_id)
+                        logger.info(f"No 'next_max_id' found. Incrementing max_id to: {new_max_id}")
+
+                    if not followers['users']:
                         logger.info("No more followers to fetch. Ending scraping.")
                         break
 
             finally:
                 self.return_cookie_to_pool(cookie_state)
                 logger.info(f"Putting cookie for account ID {current_account_id} back in the queue")
-
-                # Check for new cookie after each request
-                logger.info(f"Checking for new cookie for account ID {current_account_id}")
-                updated_cookie_state = self.check_and_update_cookie(cookie_state)
-                if updated_cookie_state != cookie_state:
-                    logger.info(f"New cookie found for account ID {current_account_id}. Updating.")
-                    cookie_state = updated_cookie_state
-                cookie_state.last_cookie_check = time.time()
 
                 wait_time = self.get_dynamic_wait_time(current_account_id)
                 logger.info(f"Waiting {wait_time:.2f} seconds before next request for account ID {current_account_id}")
@@ -366,9 +354,8 @@ class InstagramScraper:
         backoff_time = 5  # Start with 5 seconds
         for retry in range(self.max_retries):
             if not cookie_state.can_make_request():
-                logger.info(f"Rate limit reached for account ID {current_account_id}, waiting...")
-                time.sleep(300)  # Wait for 5 minutes before checking again
-                continue
+                logger.info(f"Rate limit reached for account ID {current_account_id}, signaling to switch cookie...")
+                return "RATE_LIMITED"  # Return a specific signal for rate limiting
 
             logger.info(f"Attempt {retry + 1} of {self.max_retries}")
             try:
@@ -418,9 +405,8 @@ class InstagramScraper:
                 logger.info(f"Request timed out for account ID {current_account_id}, max_id: {params.get('max_id')}")
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 401 and "Please wait" in e.response.text:
-                    logger.warning(f"Rate limit hit for account ID {current_account_id}. Waiting for {backoff_time} seconds before retry.")
-                    time.sleep(backoff_time)
-                    backoff_time *= 2  # Double the backoff time for next retry
+                    logger.warning(f"Rate limit hit for account ID {current_account_id}. Signaling to switch cookie.")
+                    return "RATE_LIMITED"  # Return a specific signal for rate limiting
                 else:
                     logger.error(f"HTTP Error for account ID {current_account_id}, max_id: {params.get('max_id')}: {e}")
                     logger.error(f"Response content: {e.response.content}")
