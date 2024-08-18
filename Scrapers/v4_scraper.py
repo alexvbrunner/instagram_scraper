@@ -149,7 +149,9 @@ class InstagramScraper:
         self.monitor_performance()  # Add performance monitoring at the end
 
     def get_base_encoded_part(self):
-        for cookie_state in self.cookie_states:
+        available_cookies = list(self.cookie_states)
+        while available_cookies:
+            cookie_state = available_cookies.pop(0)
             account_id = self.index_to_account_id[cookie_state.index]
             try:
                 logger.info(f"Attempting to fetch initial followers with account ID {account_id}")
@@ -171,6 +173,15 @@ class InstagramScraper:
                 logger.error(f"Error fetching initial followers with account ID {account_id}: {str(e)}")
                 logger.error(f"Exception details: {type(e).__name__}")
                 logger.error(traceback.format_exc())
+                
+                # Check if it's a rate limit error
+                if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code in [429, 400]:
+                    logger.warning(f"Rate limit hit for account ID {account_id}. Trying next cookie.")
+                    continue
+            
+            # If we reach here, it means we've tried all cookies or encountered a non-rate-limit error
+            if not available_cookies:
+                raise Exception("Failed to get base encoded part from any cookie")
         
         raise Exception("Failed to get base encoded part from any cookie")
 
@@ -195,21 +206,12 @@ class InstagramScraper:
     def scrape_with_cookie(self, cookie_state):
         current_account_id = self.index_to_account_id[cookie_state.index]
         logger.info(f"Starting scrape_with_cookie for account ID {current_account_id}")
+        backoff_time = 5  # Start with 5 seconds
         while not self.stop_event.is_set():
             try:
-                # Check for new cookie every 5 minutes
-                if time.time() - cookie_state.last_cookie_check > 300:
-                    logger.info(f"Checking for new cookie for account ID {current_account_id}")
-                    updated_cookie_state = self.check_and_update_cookie(cookie_state)
-                    if updated_cookie_state != cookie_state:
-                        logger.info(f"New cookie found for account ID {current_account_id}. Updating.")
-                        cookie_state = updated_cookie_state
-                    cookie_state.last_cookie_check = time.time()
-
                 if not cookie_state.can_make_request():
-                    wait_time = self.get_dynamic_wait_time(current_account_id)
-                    logger.info(f"Waiting {wait_time:.2f} seconds before next request for account ID {current_account_id}")
-                    time.sleep(wait_time)
+                    logger.info(f"Rate limit reached for account ID {current_account_id}, waiting...")
+                    time.sleep(300)  # Wait for 5 minutes before checking again
                     continue
 
                 next_max_id = self.get_next_max_id()
@@ -230,27 +232,43 @@ class InstagramScraper:
                         cookie_state.active = False
                         logger.info(f"Deactivating account ID {current_account_id} due to repeated failures.")
                         break
-                else:
-                    cookie_state.increment_request_count()
-                    logger.info(f"Successfully fetched {len(followers['users'])} followers with account ID {current_account_id}")
+                
+                    # Implement backoff strategy
+                    logger.warning(f"Rate limit hit for account ID {current_account_id}. Waiting for {backoff_time} seconds before retry.")
+                    time.sleep(backoff_time)
+                    backoff_time *= 2  # Double the backoff time for next retry
                     
-                    # Save followers to database immediately after each successful request
-                    self.save_followers(followers['users'])
-                    
-                    with self.cookie_state_lock:
-                        self.followers.extend(followers['users'])
-                        self.total_followers_scraped += len(followers['users'])
-                        logger.info(f"Total followers scraped: {self.total_followers_scraped}")
-                        if self.global_iteration >= 3:
-                            self.global_iteration += 1  # Increment for small steps
-                    
-                    cookie_state.fail_count = 0  # Reset fail count on success
-                    logger.info(f"Cumulative followers scraped: {self.total_followers_scraped}")
-                    
-                    # Remove the check for 'has_more' flag
-                    if len(followers['users']) == 0:
-                        logger.info("No more followers returned. Ending scraping.")
-                        break
+                    # Try to get a new cookie
+                    new_cookie_state = self.get_next_available_cookie()
+                    if new_cookie_state != cookie_state:
+                        logger.info(f"Switching to new cookie for account ID {self.index_to_account_id[new_cookie_state.index]}")
+                        cookie_state = new_cookie_state
+                        backoff_time = 5  # Reset backoff time for new cookie
+                    continue
+                
+                # Reset backoff time and fail count on success
+                backoff_time = 5
+                cookie_state.fail_count = 0
+                
+                cookie_state.increment_request_count()
+                logger.info(f"Successfully fetched {len(followers['users'])} followers with account ID {current_account_id}")
+                
+                # Save followers to database immediately after each successful request
+                self.save_followers(followers['users'])
+                
+                with self.cookie_state_lock:
+                    self.followers.extend(followers['users'])
+                    self.total_followers_scraped += len(followers['users'])
+                    logger.info(f"Total followers scraped: {self.total_followers_scraped}")
+                    if self.global_iteration >= 3:
+                        self.global_iteration += 1  # Increment for small steps
+                
+                logger.info(f"Cumulative followers scraped: {self.total_followers_scraped}")
+                
+                # Remove the check for 'has_more' flag
+                if len(followers['users']) == 0:
+                    logger.info("No more followers returned. Ending scraping.")
+                    break
             finally:
                 logger.info(f"Putting cookie for account ID {current_account_id} back in the queue")
                 self.cookie_queue.put(cookie_state)
