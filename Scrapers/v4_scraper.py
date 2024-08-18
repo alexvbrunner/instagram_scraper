@@ -53,7 +53,6 @@ class InstagramScraper:
         self.max_workers = len(self.account_data)
         self.stop_event = threading.Event()
         self.cookie_state_lock = threading.Lock()
-        self.max_id_lock = threading.Lock()
         self.last_max_id = "0"
         self.base_encoded_part = ""
         self.global_iteration = 0
@@ -74,6 +73,9 @@ class InstagramScraper:
         self.rate_limit_threshold = 3  # Number of suspected rate limits before backing off
         self.rate_limit_window = 600  # 10 minutes in seconds
         self.rate_limit_counts = {}  # To track rate limit hits per account
+        self.request_lock = threading.Lock()  # Add this line
+        self.current_max_id = "0"  # Add this line
+        self.unique_followers = set()  # Add this line to track unique followers
 
     def initialize_cookie_states(self):
         cookie_states = []
@@ -98,15 +100,14 @@ class InstagramScraper:
         self.available_cookies.put(cookie_state)
 
     def get_next_max_id(self):
-        logger.info("Entering get_next_max_id method")
-        with self.max_id_lock:
-            current_max_id = self.last_max_id
-            # Update last_max_id for the next call
-            if self.last_max_id is not None:
-                # Assuming max_id is a string representation of an integer
-                self.last_max_id = str(int(self.last_max_id) + self.params['count'])
-            logger.info(f"get_next_max_id: Returning max_id: {current_max_id}, Next max_id will be: {self.last_max_id}")
-            return current_max_id
+        return self.current_max_id
+
+    def update_max_id(self, new_max_id):
+        if new_max_id != self.current_max_id:
+            self.current_max_id = new_max_id
+            logger.info(f"update_max_id: Updated current_max_id to: {new_max_id}")
+        else:
+            logger.info(f"update_max_id: Max ID {new_max_id} already in use, not updating")
 
     def get_new_cookie_from_db(self, account_id, old_cookie):
         try:
@@ -239,7 +240,6 @@ class InstagramScraper:
         cookie_state = initial_cookie_state
         current_account_id = self.index_to_account_id[cookie_state.index]
         logger.info(f"Starting scrape_with_cookie for account ID {current_account_id}")
-        backoff_time = 5  # Start with 5 seconds
         last_cookie_check = time.time()
 
         while not self.stop_event.is_set():
@@ -257,45 +257,50 @@ class InstagramScraper:
                     time.sleep(300)  # Wait for 5 minutes before checking again
                     continue
 
-                next_max_id = self.get_next_max_id()
-                logger.info(f"scrape_with_cookie: Retrieved next_max_id: {next_max_id} for account ID {current_account_id}")
-                if next_max_id is None:
-                    logger.info(f"No more max_id available for account ID {current_account_id}, breaking loop")
-                    break
+                with self.request_lock:
+                    next_max_id = self.get_next_max_id()
+                    logger.info(f"scrape_with_cookie: Retrieved next_max_id: {next_max_id} for account ID {current_account_id}")
 
-                logger.info(f"Fetching with account ID {current_account_id}, max_id: {next_max_id}")
-                
-                params = self.params.copy()
-                params['max_id'] = next_max_id
-                followers = self.fetch_followers(cookie_state, params)
-                
-                if followers is None:
-                    logger.info(f"No followers returned for account ID {current_account_id}, max_id: {next_max_id}")
-                    self.increment_rate_limit_count(current_account_id)
-                    if self.should_backoff(current_account_id):
-                        logger.warning(f"Rate limit threshold reached for account ID {current_account_id}. Backing off.")
-                        time.sleep(300)  # 5 minute backoff
-                        self.reset_rate_limit_count(current_account_id)
-                    continue
-                
-                logger.info(f"Successfully fetched followers for account ID {current_account_id}, max_id: {next_max_id}")
-                
-                # Save followers to database immediately after each successful request
-                self.save_followers(followers['users'])
-                
-                with self.cookie_state_lock:
-                    self.followers.extend(followers['users'])
-                    self.total_followers_scraped += len(followers['users'])
-                    logger.info(f"Total followers scraped: {self.total_followers_scraped}")
-                    if self.global_iteration >= 3:
-                        self.global_iteration += 1  # Increment for small steps
-                
-                logger.info(f"Cumulative followers scraped: {self.total_followers_scraped}")
-                
-                # Remove the check for 'has_more' flag
-                if len(followers['users']) == 0:
-                    logger.info("No more followers returned. Ending scraping.")
-                    break
+                    logger.info(f"Fetching with account ID {current_account_id}, max_id: {next_max_id}")
+                    
+                    params = self.params.copy()
+                    params['max_id'] = next_max_id
+                    followers = self.fetch_followers(cookie_state, params)
+                    
+                    if followers is None:
+                        logger.info(f"No followers returned for account ID {current_account_id}, max_id: {next_max_id}")
+                        self.increment_rate_limit_count(current_account_id)
+                        if self.should_backoff(current_account_id):
+                            logger.warning(f"Rate limit threshold reached for account ID {current_account_id}. Backing off.")
+                            time.sleep(300)  # 5 minute backoff
+                            self.reset_rate_limit_count(current_account_id)
+                        continue
+                    
+                    logger.info(f"Successfully fetched followers for account ID {current_account_id}, max_id: {next_max_id}")
+                    
+                    # Save followers to database immediately after each successful request
+                    self.save_followers(followers['users'])
+                    
+                    with self.cookie_state_lock:
+                        new_followers = [follower['username'] for follower in followers['users']]
+                        self.unique_followers.update(new_followers)
+                        self.followers.extend(followers['users'])
+                        self.total_followers_scraped += len(followers['users'])
+                        logger.info(f"Total followers scraped: {self.total_followers_scraped}")
+                        logger.info(f"Unique followers scraped: {len(self.unique_followers)}")
+                        if self.global_iteration >= 3:
+                            self.global_iteration += 1  # Increment for small steps
+                    
+                    logger.info(f"Cumulative followers scraped: {self.total_followers_scraped}")
+                    logger.info(f"Cumulative unique followers scraped: {len(self.unique_followers)}")
+                    
+                    # Check if we've reached the end of the followers list
+                    if 'next_max_id' in followers:
+                        self.update_max_id(followers['next_max_id'])
+                    else:
+                        logger.info("No more followers to fetch. Ending scraping.")
+                        break
+
             finally:
                 self.return_cookie_to_pool(cookie_state)
                 logger.info(f"Putting cookie for account ID {current_account_id} back in the queue")
@@ -400,11 +405,13 @@ class InstagramScraper:
                     logger.warning("'users' list is empty in response data")
                 
                 if 'next_max_id' in data:
-                    with self.max_id_lock:
-                        self.last_max_id = data['next_max_id']
-                    logger.info(f"fetch_followers: Updated last_max_id to: {self.last_max_id}")
+                    self.update_max_id(data['next_max_id'])
                 else:
                     logger.warning("fetch_followers: 'next_max_id' not found in response data")
+                    # If no next_max_id is provided, we'll increment it ourselves
+                    current_max_id = params.get('max_id', '0')
+                    new_max_id = str(int(current_max_id) + len(data.get('users', [])))
+                    self.update_max_id(new_max_id)
                 
                 return data
             except requests.exceptions.Timeout:
@@ -545,10 +552,11 @@ class InstagramScraper:
 
     def save_state(self):
         state = {
-            'last_max_id': self.last_max_id,
+            'current_max_id': self.current_max_id,
             'base_encoded_part': self.base_encoded_part,
             'global_iteration': self.global_iteration,
             'total_followers_scraped': self.total_followers_scraped,
+            'unique_followers': list(self.unique_followers),  # Add this line
             'cookie_states': {
                 self.account_data[cs.index]['id']: {
                     'active': cs.active,
@@ -566,10 +574,11 @@ class InstagramScraper:
         try:
             with open(f'{self.user_id}_state.json', 'r') as f:
                 state = json.load(f)
-            self.last_max_id = state['last_max_id']
+            self.current_max_id = state['current_max_id']
             self.base_encoded_part = state['base_encoded_part']
             self.global_iteration = state['global_iteration']
             self.total_followers_scraped = state['total_followers_scraped']
+            self.unique_followers = set(state.get('unique_followers', []))  # Add this line
             for account_id, cs_state in state['cookie_states'].items():
                 if account_id in self.account_id_to_index:
                     index = self.account_id_to_index[account_id]
@@ -589,6 +598,7 @@ class InstagramScraper:
         
         logger.info(f"Performance Monitor:")
         logger.info(f"Total followers scraped: {self.total_followers_scraped}")
+        logger.info(f"Total unique followers scraped: {len(self.unique_followers)}")
         logger.info(f"Total requests made: {total_requests}")
         logger.info(f"Success rate: {success_rate:.2%}")
         logger.info(f"Rate limit info: {self.rate_limit_info}")
