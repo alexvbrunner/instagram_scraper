@@ -246,6 +246,7 @@ class InstagramScraper:
         current_account_id = self.index_to_account_id[cookie_state.index]
         logger.info(f"Starting scrape_with_cookie for account ID {current_account_id}")
         last_cookie_check = time.time()
+        scraping_complete = False  # Add this flag
 
         while not self.stop_event.is_set():
             try:
@@ -310,17 +311,20 @@ class InstagramScraper:
 
                     if not followers['users']:
                         logger.info("No more followers to fetch. Ending scraping.")
+                        scraping_complete = True  # Set the flag
                         break
 
             finally:
                 self.return_cookie_to_pool(cookie_state)
                 logger.info(f"Putting cookie for account ID {current_account_id} back in the queue")
 
-                # Only wait if the current account is rate limited
-                if not cookie_state.can_make_request():
+                # Only wait if the current account is rate limited and scraping is not complete
+                if not scraping_complete and not cookie_state.can_make_request():
                     wait_time = self.get_dynamic_wait_time(current_account_id)
                     logger.info(f"Waiting {wait_time:.2f} seconds before next request for account ID {current_account_id}")
                     time.sleep(wait_time)
+                elif scraping_complete:
+                    logger.info("Scraping complete, skipping final wait.")
                 else:
                     # If the account can make a request, continue immediately
                     continue
