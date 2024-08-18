@@ -5,6 +5,7 @@ from mysql.connector import Error
 import csv
 import json
 import random
+from datetime import datetime, timedelta
 
 def get_database_connection():
     try:
@@ -22,15 +23,39 @@ def get_database_connection():
 def get_accounts_from_database(connection):
     try:
         cursor = connection.cursor(dictionary=True)
+        
+        # Get the current time
+        current_time = datetime.now()
+        
+        # Calculate the cutoff time (5 hours ago)
+        cutoff_time = current_time - timedelta(hours=5)
+        
         cursor.execute("""
             SELECT id, proxy_address, proxy_port, proxy_username, proxy_password, 
-                   cookies, user_agent
+                   cookies, user_agent, cookie_timestamp
             FROM accounts 
-            WHERE instagram_created = TRUE AND cookies IS NOT NULL
-        """)
+            WHERE instagram_created = TRUE 
+              AND cookies IS NOT NULL
+              AND cookie_timestamp > %s
+        """, (cutoff_time,))
+        
         accounts = cursor.fetchall()
         cursor.close()
-        return accounts
+        
+        # Filter accounts and print information
+        valid_accounts = []
+        for account in accounts:
+            cookie_time = datetime.strptime(account['cookie_timestamp'], '%Y-%m-%dT%H:%M:%S.%f')
+            age = current_time - cookie_time
+            if age <= timedelta(hours=5):
+                valid_accounts.append(account)
+                print(f"Account ID: {account['id']}, Cookie Age: {age}")
+            else:
+                print(f"Skipping Account ID: {account['id']}, Cookie Age: {age} (too old)")
+        
+        print(f"Total accounts: {len(accounts)}, Valid accounts: {len(valid_accounts)}")
+        
+        return valid_accounts
     except Error as e:
         print(f"Error fetching accounts from database: {e}")
         sys.exit(1)
