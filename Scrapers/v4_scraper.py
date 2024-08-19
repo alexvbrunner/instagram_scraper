@@ -263,6 +263,10 @@ class InstagramScraper:
                     params['max_id'] = current_max_id
                     followers = self.fetch_followers(cookie_state, params)
 
+                    if followers is None:
+                        logger.info(f"No more followers to fetch for account ID {current_account_id}. Ending scraping.")
+                        break
+
                     if followers == "RATE_LIMITED":
                         logger.info(f"Rate limit reached for account ID {current_account_id}, switching cookie...")
                         self.increment_rate_limit_count(current_account_id)
@@ -419,11 +423,22 @@ class InstagramScraper:
                     self.update_max_id(data['next_max_id'])
                 else:
                     logger.warning("fetch_followers: 'next_max_id' not found in response data")
-                    # If no next_max_id is provided, we'll increment it ourselves
+                    # If no next_max_id is provided, we'll use a different approach
                     current_max_id = params.get('max_id', '0')
-                    new_max_id = str(int(current_max_id) + len(data.get('users', [])))
-                    self.update_max_id(new_max_id)
-                
+                    if '|' in current_max_id:
+                        # If the current_max_id contains a '|', it's likely in the format we can't increment
+                        # In this case, we'll return None to signal that we've reached the end
+                        logger.info("Reached the end of pagination. No more followers to fetch.")
+                        return None
+                    else:
+                        # If it's a simple integer, we can increment it
+                        try:
+                            new_max_id = str(int(current_max_id) + len(data.get('users', [])))
+                            self.update_max_id(new_max_id)
+                        except ValueError:
+                            logger.error(f"Unable to increment max_id: {current_max_id}")
+                            return None
+
                 return data
             except requests.exceptions.Timeout:
                 logger.info(f"Request timed out for account ID {current_account_id}, max_id: {params.get('max_id')}")
