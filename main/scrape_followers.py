@@ -48,6 +48,7 @@ def get_accounts_from_database(connection):
             FROM accounts 
             WHERE instagram_created = TRUE 
               AND cookies IS NOT NULL
+              AND status = 'Active'
               AND cookie_timestamp > %s
         """, (cutoff_time,))
         
