@@ -11,6 +11,7 @@ import traceback
 import numpy as np
 from gender_guesser import detector as gender_detector
 import queue
+import heapq  # Add this import at the top of the file
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -39,6 +40,13 @@ class CookieState:
     def increment_request_count(self):
         self.requests_this_hour += 1
         self.last_request_time = time.time()
+
+    # Add these methods to support comparison
+    def __lt__(self, other):
+        return self.last_request_time < other.last_request_time
+
+    def __eq__(self, other):
+        return self.last_request_time == other.last_request_time
 
 class InstagramScraper:
     def __init__(self, user_id, csv_filename, account_data, db_config):
@@ -76,6 +84,7 @@ class InstagramScraper:
         self.request_lock = threading.Lock()  # Add this line
         self.current_max_id = "0"  # Add this line
         self.unique_followers = set()  # Add this line to track unique followers
+        self.account_wait_times = {}  # Add this line to track wait times for each account
 
     def initialize_cookie_states(self):
         cookie_states = []
@@ -91,10 +100,32 @@ class InstagramScraper:
             self.available_cookies.put(cookie_state)
 
     def get_next_available_cookie(self):
-        try:
-            return self.available_cookies.get_nowait()
-        except queue.Empty:
+        current_time = time.time()
+        available_cookies = []
+        for cookie_state in self.cookie_states:
+            account_id = self.index_to_account_id[cookie_state.index]
+            if cookie_state.can_make_request():
+                available_cookies.append((0, current_time, cookie_state))
+            else:
+                wait_time = 300 - (current_time - cookie_state.last_request_time)
+                available_cookies.append((wait_time, current_time, cookie_state))
+                self.account_wait_times[account_id] = wait_time
+
+        if not available_cookies:
             return None
+
+        heapq.heapify(available_cookies)
+        next_available = heapq.heappop(available_cookies)
+        wait_time, _, cookie_state = next_available
+
+        logger.info(f"Next available cookie: Account ID {self.index_to_account_id[cookie_state.index]}, Wait time: {wait_time:.2f} seconds")
+        logger.info(f"Current wait times for all accounts: {json.dumps(self.account_wait_times, indent=2)}")
+
+        if wait_time > 0:
+            logger.info(f"Waiting {wait_time:.2f} seconds before next request")
+            time.sleep(wait_time)
+
+        return cookie_state
 
     def return_cookie_to_pool(self, cookie_state):
         self.available_cookies.put(cookie_state)
@@ -325,13 +356,14 @@ class InstagramScraper:
                 # Only wait if the current account is rate limited and scraping is not complete
                 if not scraping_complete and not cookie_state.can_make_request():
                     wait_time = self.get_dynamic_wait_time(current_account_id)
-                    logger.info(f"Waiting {wait_time:.2f} seconds before next request for account ID {current_account_id}")
+                    self.account_wait_times[current_account_id] = wait_time
+                    logger.info(f"Account ID {current_account_id} needs to wait {wait_time:.2f} seconds before next request")
+                    logger.info(f"Current wait times for all accounts: {json.dumps(self.account_wait_times, indent=2)}")
                     time.sleep(wait_time)
                 elif scraping_complete:
                     logger.info("Scraping complete, skipping final wait.")
                 else:
-                    # If the account can make a request, continue immediately
-                    continue
+                    logger.info(f"Account ID {current_account_id} can make a request immediately")
 
         logger.info(f"Exiting scrape_with_cookie for account ID {current_account_id}")
 
@@ -647,6 +679,10 @@ class InstagramScraper:
         for account_id, time_until_available in rate_limited_accounts:
             logger.info(f"  Account ID {account_id}: {time_until_available:.2f} seconds until available")
 
+        logger.info("Account wait times:")
+        for account_id, wait_time in self.account_wait_times.items():
+            logger.info(f"  Account ID {account_id}: {wait_time:.2f} seconds")
+
     def log_account_status(self):
         available_accounts = []
         rate_limited_accounts = []
@@ -656,14 +692,19 @@ class InstagramScraper:
             account_id = self.index_to_account_id[cs.index]
             if cs.can_make_request():
                 available_accounts.append(account_id)
+                self.account_wait_times[account_id] = 0
             else:
                 time_until_available = 300 - (current_time - cs.last_request_time)
                 rate_limited_accounts.append((account_id, time_until_available))
+                self.account_wait_times[account_id] = time_until_available
 
         logger.info(f"Available accounts: {', '.join(map(str, available_accounts))}")
         logger.info("Rate-limited accounts:")
         for account_id, time_until_available in rate_limited_accounts:
             logger.info(f"  Account ID {account_id}: {time_until_available:.2f} seconds until available")
+
+        logger.info("Current wait times for all accounts:")
+        logger.info(json.dumps(self.account_wait_times, indent=2))
 
     def check_and_update_cookie(self, cookie_state):
         account_id = self.index_to_account_id[cookie_state.index]
