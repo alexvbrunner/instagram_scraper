@@ -358,7 +358,7 @@ class InstagramScraper:
                     wait_time = self.get_dynamic_wait_time(current_account_id)
                     self.account_wait_times[current_account_id] = wait_time
                     logger.info(f"Account ID {current_account_id} needs to wait {wait_time:.2f} seconds before next request")
-                    logger.info(f"Current wait times for all accounts: {json.dumps(self.account_wait_times, indent=2)}")
+                    # logger.info(f"Current wait times for all accounts: {json.dumps(self.account_wait_times, indent=2)}")
                     time.sleep(wait_time)
                 elif scraping_complete:
                     logger.info("Scraping complete, skipping final wait.")
@@ -679,9 +679,9 @@ class InstagramScraper:
         for account_id, time_until_available in rate_limited_accounts:
             logger.info(f"  Account ID {account_id}: {time_until_available:.2f} seconds until available")
 
-        logger.info("Account wait times:")
-        for account_id, wait_time in self.account_wait_times.items():
-            logger.info(f"  Account ID {account_id}: {wait_time:.2f} seconds")
+        # logger.info("Account wait times:")
+        # for account_id, wait_time in self.account_wait_times.items():
+        #     logger.info(f"  Account ID {account_id}: {wait_time:.2f} seconds")
 
     def log_account_status(self):
         available_accounts = []
@@ -703,8 +703,8 @@ class InstagramScraper:
         for account_id, time_until_available in rate_limited_accounts:
             logger.info(f"  Account ID {account_id}: {time_until_available:.2f} seconds until available")
 
-        logger.info("Current wait times for all accounts:")
-        logger.info(json.dumps(self.account_wait_times, indent=2))
+        # logger.info("Current wait times for all accounts:")
+        # logger.info(json.dumps(self.account_wait_times, indent=2))
 
     def check_and_update_cookie(self, cookie_state):
         account_id = self.index_to_account_id[cookie_state.index]
