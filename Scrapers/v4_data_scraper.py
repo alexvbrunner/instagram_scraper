@@ -32,7 +32,7 @@ class CookieState:
         self.last_cookie_check = time.time()
         self.is_rate_limited = False
         self.cooldown_time = 30
-        self.min_cooldown = 10
+        self.min_cooldown = 1
         self.max_requests_per_hour = 30
         self.rate_limit_start_time = 0
 
@@ -131,8 +131,8 @@ class InstagramUserDataScraper:
         next_available = heapq.heappop(available_cookies)
         wait_time, _, cookie_state = next_available
 
-        logger.debug(f"Next available cookie: Account ID {cookie_state.account_id}, Wait time: {wait_time:.2f} seconds")
-        logger.debug(f"Current wait times for all accounts: {json.dumps(self.account_wait_times, indent=2)}")
+        logger.info(f"Next available cookie: Account ID {cookie_state.account_id}, Wait time: {wait_time:.2f} seconds")
+        logger.info(f"Current wait times for all accounts: {json.dumps(self.account_wait_times, indent=2)}")
 
         if wait_time > 0:
             logger.info(f"Waiting {wait_time:.2f} seconds before next request")
@@ -170,8 +170,13 @@ class InstagramUserDataScraper:
         scrapes_per_day = scrapes_per_hour * 24
 
         # Calculate available and timeout accounts
-        available_accounts = sum(1 for cs in self.cookie_states if cs.can_make_request() and not cs.is_rate_limited)
-        timeout_accounts = len(self.cookie_states) - available_accounts
+        available_accounts = []
+        timeout_accounts = []
+        for cs in self.cookie_states:
+            if cs.can_make_request() and not cs.is_rate_limited:
+                available_accounts.append(cs.account_id)
+            else:
+                timeout_accounts.append(cs.account_id)
 
         # Estimate time to completion
         remaining_users = total_users - processed_users
@@ -187,8 +192,8 @@ class InstagramUserDataScraper:
         logger.info(f"Average scrapes per minute: {scrapes_per_minute:.2f}")
         logger.info(f"Average scrapes per hour: {scrapes_per_hour:.2f}")
         logger.info(f"Average scrapes per day: {scrapes_per_day:.2f}")
-        logger.info(f"Available accounts: {available_accounts}")
-        logger.info(f"Accounts in timeout: {timeout_accounts}")
+        logger.info(f"Available accounts: {len(available_accounts)} ({', '.join(map(str, available_accounts))})")
+        logger.info(f"Accounts in timeout: {len(timeout_accounts)} ({', '.join(map(str, timeout_accounts))})")
         logger.info(f"Estimated time to completion: {completion_time}")
         logger.info("-------------------------------")
 
