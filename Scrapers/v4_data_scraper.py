@@ -11,6 +11,7 @@ import concurrent.futures
 import queue
 import heapq
 import numpy as np
+from queue import Queue, PriorityQueue
 import threading
 from datetime import datetime, timedelta
 
@@ -79,12 +80,19 @@ class InstagramUserDataScraper:
         self.gender_detector = gender.Detector()
         self.state = self.load_state()
         self.cookie_states = self.initialize_cookie_states()
-        self.available_cookies = queue.Queue()
-        self.initialize_available_cookies()
+        self.account_queue = PriorityQueue()
+        self.initialize_account_queue()
+        self.account_lock = threading.Lock()
+        self.max_concurrent_requests = min(5, len(self.cookie_states))  # Ensure we don't exceed available accounts
         self.request_lock = threading.Lock()
         self.account_wait_times = {account['id']: 0 for account in self.account_data}
         self.start_time = time.time()
         self.scrape_count = 0
+        self.user_queue = Queue()
+        for user_id in self.user_ids:
+            self.user_queue.put(user_id)
+        self.processing_users = set()
+        self.processing_lock = threading.Lock()
 
     def initialize_cookie_states(self):
         cookie_states = []
@@ -94,54 +102,38 @@ class InstagramUserDataScraper:
             cookie_states.append(cookie_state)
         return cookie_states
 
-    def initialize_available_cookies(self):
-        for cookie_state in self.cookie_states:
-            self.available_cookies.put(cookie_state)
-
-    def get_next_available_cookie(self, excluded_account_ids=None):
-        if excluded_account_ids is None:
-            excluded_account_ids = set()
-
+    def initialize_account_queue(self):
         current_time = time.time()
-        available_cookies = []
         for cookie_state in self.cookie_states:
-            if not cookie_state.active or cookie_state.account_id in excluded_account_ids:
-                continue  # Skip inactive or excluded accounts
-            
-            cookie_state.check_and_reset_rate_limit()
-            
-            if cookie_state.is_rate_limited:
-                wait_time = cookie_state.rate_limit_start_time + cookie_state.cooldown_time - current_time
-                if wait_time > 0:
-                    available_cookies.append((wait_time, current_time, cookie_state))
-                    self.account_wait_times[cookie_state.account_id] = wait_time
-                continue
+            self.account_queue.put((current_time, cookie_state))
 
-            if cookie_state.can_make_request():
-                available_cookies.append((0, current_time, cookie_state))
-            else:
-                wait_time = max(cookie_state.min_cooldown, cookie_state.cooldown_time - (current_time - cookie_state.last_request_time))
-                available_cookies.append((wait_time, current_time, cookie_state))
-                self.account_wait_times[cookie_state.account_id] = wait_time
+    def get_next_available_account(self):
+        with self.account_lock:
+            current_time = time.time()
+            for _ in range(len(self.cookie_states)):  # Check all accounts
+                if self.account_queue.empty():
+                    logger.warning("Account queue is empty. Reinitializing...")
+                    self.initialize_account_queue()
+                    continue
 
-        if not available_cookies:
+                next_available_time, cookie_state = self.account_queue.get()
+                
+                if next_available_time <= current_time:
+                    logger.info(f"Using account ID {cookie_state.account_id}")
+                    return cookie_state
+                else:
+                    # If not available yet, put it back in the queue
+                    self.account_queue.put((next_available_time, cookie_state))
+            
+            # If we've checked all accounts and none are available, return None
+            logger.warning("No available accounts at the moment.")
             return None
 
-        heapq.heapify(available_cookies)
-        next_available = heapq.heappop(available_cookies)
-        wait_time, _, cookie_state = next_available
-
-        logger.info(f"Next available cookie: Account ID {cookie_state.account_id}, Wait time: {wait_time:.2f} seconds")
-        logger.info(f"Current wait times for all accounts: {json.dumps(self.account_wait_times, indent=2)}")
-
-        if wait_time > 0:
-            logger.info(f"Waiting {wait_time:.2f} seconds before next request")
-            time.sleep(wait_time)
-
-        return cookie_state
-
-    def return_cookie_to_pool(self, cookie_state):
-        self.available_cookies.put(cookie_state)
+    def return_account_to_queue(self, cookie_state, cooldown=0):
+        with self.account_lock:
+            next_available_time = time.time() + cooldown
+            self.account_queue.put((next_available_time, cookie_state))
+            logger.info(f"Account ID {cookie_state.account_id} returned to queue. Next available at: {next_available_time}")
 
     def load_state(self):
         try:
@@ -195,6 +187,8 @@ class InstagramUserDataScraper:
         logger.info(f"Available accounts: {len(available_accounts)} ({', '.join(map(str, available_accounts))})")
         logger.info(f"Accounts in timeout: {len(timeout_accounts)} ({', '.join(map(str, timeout_accounts))})")
         logger.info(f"Estimated time to completion: {completion_time}")
+        logger.info(f"Currently processing users: {len(self.processing_users)}")
+        logger.info(f"Remaining users in queue: {self.user_queue.qsize()}")
         logger.info("-------------------------------")
 
     def scrape_user_data(self):
@@ -202,68 +196,93 @@ class InstagramUserDataScraper:
         last_stats_time = time.time()
         stats_interval = 1  # Display statistics every x seconds
 
-        # Find the starting point based on previously processed users
-        start_index = len(self.state['scraped_users']) + len(self.state['skipped_user_ids'])
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_concurrent_requests) as executor:
+            futures = set()  # Change this to a set
+            while not self.user_queue.empty() or futures:
+                while len(futures) < self.max_concurrent_requests and not self.user_queue.empty():
+                    user_id = self.user_queue.get()
+                    account = self.get_next_available_account()
+                    if account is None:
+                        self.user_queue.put(user_id)  # Put the user_id back in the queue
+                        break
+                    with self.processing_lock:
+                        if user_id not in self.processing_users:
+                            self.processing_users.add(user_id)
+                            futures.add(executor.submit(self.process_single_user, user_id))  # Add to set
 
-        for index, user_id in enumerate(self.user_ids[start_index:], start_index + 1):
-            logger.info(f"Processing user ID {user_id} ({index}/{total_users})")
+                # Wait for the first future to complete
+                done, futures = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
 
-            retry_count = 0
-            max_retries = 3  # Maximum number of retries per user
-            excluded_account_ids = set()
+                for future in done:
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"Error in thread: {str(e)}")
 
-            while retry_count < max_retries:
-                try:
-                    user_data, used_account_id = self.fetch_user_data(user_id, excluded_account_ids)
-                    if user_data:
-                        processed_data = self.process_user_data(user_data)
-                        if processed_data:
-                            self.save_user_data(processed_data)
-                            self.state['scraped_users'].append(user_id)
-                            self.state['total_scraped'] += 1
-                            self.scrape_count += 1
-                            logger.info(f"Successfully scraped data for user ID: {user_id}")
-                            break  # Exit the retry loop on success
-                        else:
-                            logger.error(f"Failed to process data for user ID: {user_id}")
-                            self.state['skipped_user_ids'].append(user_id)
-                            break  # Exit the retry loop if processing fails
-                    else:
-                        logger.warning(f"No data found for user ID: {user_id}")
-                        retry_count += 1
-                        if used_account_id:
-                            excluded_account_ids.add(used_account_id)
-                        if retry_count < max_retries:
-                            logger.info(f"Retrying user ID {user_id} (Attempt {retry_count + 1}/{max_retries})")
-                            time.sleep(5)  # Wait 5 seconds before retrying
-                        else:
-                            logger.warning(f"Max retries reached for user ID: {user_id}")
-                            self.state['skipped_user_ids'].append(user_id)
-                except Exception as e:
-                    logger.error(f"Error occurred while scraping User ID {user_id}: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        logger.info(f"Retrying user ID {user_id} (Attempt {retry_count + 1}/{max_retries})")
-                        time.sleep(5)  # Wait 5 seconds before retrying
-                    else:
-                        logger.warning(f"Max retries reached for user ID: {user_id}")
-                        self.state['skipped_user_ids'].append(user_id)
-
-            self.save_state()
-            
-            current_time = time.time()
-            if current_time - last_stats_time >= stats_interval:
-                self.display_statistics()
-                last_stats_time = current_time
-
-            logger.info(f"Progress: {index}/{total_users} users processed")
-            logger.info("-" * 50)
+                current_time = time.time()
+                if current_time - last_stats_time >= stats_interval:
+                    self.display_statistics()
+                    last_stats_time = current_time
 
         self.display_statistics()  # Display final statistics
         logger.info("User data scraping process completed for all user IDs.")
         logger.info(f"Final total completed user data scrapes: {len(self.state['scraped_users'])}")
         logger.info(f"Total skipped user IDs: {len(self.state['skipped_user_ids'])}")
+
+    def process_single_user(self, user_id):
+        logger.info(f"Processing user ID {user_id}")
+        retry_count = 0
+        max_retries = 3
+
+        while retry_count < max_retries:
+            account = self.get_next_available_account()
+            if account is None:
+                logger.warning(f"No available accounts. Waiting before retry for user ID {user_id}")
+                self.display_statistics()
+                time.sleep(5)  # Wait for a minute before trying again
+                continue
+
+            logger.info(f"Using account ID {account.account_id} for user ID {user_id}")
+            try:
+                user_data = self.fetch_user_data(user_id, account)
+                if user_data:
+                    processed_data = self.process_user_data(user_data)
+                    if processed_data:
+                        self.save_user_data(processed_data)
+                        with self.processing_lock:
+                            self.state['scraped_users'].append(user_id)
+                            self.state['total_scraped'] += 1
+                            self.scrape_count += 1
+                            self.processing_users.remove(user_id)
+                        logger.info(f"Successfully scraped data for user ID: {user_id}")
+                        self.return_account_to_queue(account)
+                        break
+                    else:
+                        logger.error(f"Failed to process data for user ID: {user_id}")
+                        with self.processing_lock:
+                            self.state['skipped_user_ids'].append(user_id)
+                            self.processing_users.remove(user_id)
+                        self.return_account_to_queue(account)
+                        break
+                else:
+                    logger.warning(f"No data found for user ID: {user_id}")
+                    retry_count += 1
+                    self.return_account_to_queue(account, cooldown=5)  # Short cooldown for no data
+            except Exception as e:
+                logger.error(f"Error occurred while scraping User ID {user_id}: {str(e)}")
+                logger.error(traceback.format_exc())
+                retry_count += 1
+                self.return_account_to_queue(account, cooldown=30)  # Longer cooldown for errors
+
+            if retry_count < max_retries:
+                logger.info(f"Retrying user ID {user_id} (Attempt {retry_count + 1}/{max_retries})")
+            else:
+                logger.warning(f"Max retries reached for user ID: {user_id}")
+                with self.processing_lock:
+                    self.state['skipped_user_ids'].append(user_id)
+                    self.processing_users.remove(user_id)
+
+        self.save_state()
 
     def get_new_cookie_from_db(self, account_id, old_cookie):
         try:
@@ -311,12 +330,9 @@ class InstagramUserDataScraper:
             logger.debug(f"No new cookie found for account ID {account_id}")
         return cookie_state
 
-    def fetch_user_data(self, user_id, excluded_account_ids=None):
-        if excluded_account_ids is None:
-            excluded_account_ids = set()
-
+    def fetch_user_data(self, user_id, account):
         with self.request_lock:
-            cookie_state = self.get_next_available_cookie(excluded_account_ids)
+            cookie_state = account
             if cookie_state is None:
                 logger.warning("No available cookies. Waiting before retry...")
                 time.sleep(60)
@@ -355,13 +371,12 @@ class InstagramUserDataScraper:
             data = response.json()
             
             cookie_state.increment_request_count()
-            self.return_cookie_to_pool(cookie_state)
             
             if 'user' in data:
-                return data['user'], current_account_id
+                return data['user']
             else:
                 logger.warning(f"No user data found for user ID: {user_id}")
-                return None, current_account_id
+                return None
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 400:
                 response_content = e.response.content.decode('utf-8')
@@ -369,24 +384,22 @@ class InstagramUserDataScraper:
                     logger.error(f"Challenge required for account ID {current_account_id}. Disabling this account for the session.")
                     cookie_state.active = False
                     self.save_state()
-                    return None, current_account_id
+                    return None
                 else:
                     logger.error(f"HTTP Error 400 for account ID {current_account_id}, user ID {user_id}: {e}")
                     logger.error(f"Response content: {response_content}")
-                    return None, current_account_id
+                    return None
             elif e.response.status_code in [401, 429]:
                 logger.warning(f"Rate limit hit for account ID {current_account_id}.")
                 cookie_state.set_rate_limit()
-                self.return_cookie_to_pool(cookie_state)
-                return None, current_account_id  # Return None and the rate-limited account ID
+                return None  # Return None and the rate-limited account ID
             else:
                 logger.error(f"HTTP Error for account ID {current_account_id}, user ID {user_id}: {e}")
                 logger.error(f"Response content: {e.response.content}")
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching data for user ID {user_id}: {str(e)}")
         
-        self.return_cookie_to_pool(cookie_state)
-        return None, current_account_id
+        return None
 
     def update_rate_limit_info(self, account_id, headers):
         if 'X-Ratelimit-Remaining' in headers:
