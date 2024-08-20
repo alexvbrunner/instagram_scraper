@@ -116,6 +116,14 @@ class CookieState:
         self.requests_this_hour += 1
         self.last_request_time = time.time()
 
+def load_scraped_followers_count(user_id):
+    try:
+        with open(f'{user_id}_state.json', 'r') as f:
+            state = json.load(f)
+        return state.get('total_followers_scraped', 0)
+    except FileNotFoundError:
+        return 0
+
 def main():
     connection = get_database_connection()
     accounts = get_accounts_from_database(connection)
@@ -152,6 +160,11 @@ def main():
 
     logger.info(f"Found {len(user_ids)} user IDs to scrape.")
 
+    # Log the number of accounts and users per account
+    logger.info(f"Number of accounts selected for scraping: {num_accounts}")
+    users_per_account = len(user_ids) // num_accounts
+    logger.info(f"Number of users per account: {users_per_account}")
+
     # Randomize the order of user IDs
     random.shuffle(user_ids)
 
@@ -163,6 +176,10 @@ def main():
     }
 
     for user_id in user_ids:
+        # Load and log the number of followers already scraped for this user ID
+        scraped_count = load_scraped_followers_count(user_id)
+        logger.info(f"User ID: {user_id} - Followers already scraped: {scraped_count}")
+
         logger.info(f"Scraping followers for User ID: {user_id}")
         
         # Prepare account data for v4_scraper.py
