@@ -175,12 +175,25 @@ def main():
         'database': 'main'
     }
 
+    scraped_counts = {}
+    total_scraped = 0
+
+    # Load and print initial scraped counts
+    logger.info("Initial scraped follower counts:")
     for user_id in user_ids:
-        # Load and log the number of followers already scraped for this user ID
         scraped_count = load_scraped_followers_count(user_id)
+        scraped_counts[user_id] = scraped_count
+        total_scraped += scraped_count
         logger.info(f"User ID: {user_id} - Followers already scraped: {scraped_count}")
 
-        logger.info(f"Scraping followers for User ID: {user_id}")
+    logger.info("Initial scraped follower counts per user ID:")
+    logger.info(json.dumps(scraped_counts, indent=2))
+    logger.info(f"Initial total scraped followers from all user IDs: {total_scraped}")
+    logger.info("-" * 50)
+
+    for user_id in user_ids:
+        initial_count = scraped_counts[user_id]
+        logger.info(f"Starting scrape for User ID: {user_id} - Initial follower count: {initial_count}")
         
         # Prepare account data for v4_scraper.py
         account_data = []
@@ -229,10 +242,22 @@ def main():
             logger.error(traceback.format_exc())
             continue
 
-        logger.info(f"Finished scraping for User ID: {user_id}")
+        # Update scraped count after scraping
+        new_count = load_scraped_followers_count(user_id)
+        scraped_counts[user_id] = new_count
+        total_scraped += (new_count - initial_count)
+        logger.info(f"Finished scraping for User ID: {user_id} - New follower count: {new_count}")
+        logger.info(f"Followers scraped in this session: {new_count - initial_count}")
         logger.info("-" * 50)
 
     logger.info("Scraping process completed for all user IDs.")
+    
+    # Print the final dictionary of user IDs and their scraped follower counts
+    logger.info("Final scraped follower counts per user ID:")
+    logger.info(json.dumps(scraped_counts, indent=2))
+    
+    # Print the final total sum of scraped users
+    logger.info(f"Final total scraped followers from all user IDs: {total_scraped}")
 
 if __name__ == "__main__":
     main()

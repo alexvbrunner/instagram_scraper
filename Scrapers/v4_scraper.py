@@ -85,6 +85,8 @@ class InstagramScraper:
         self.current_max_id = "0"  # Add this line
         self.unique_followers = set()  # Add this line to track unique followers
         self.account_wait_times = {}  # Add this line to track wait times for each account
+        self.empty_users_count = 0  # Add this line to track empty users lists
+        self.max_empty_users = 3  # Maximum number of consecutive empty users lists before stopping
 
     def initialize_cookie_states(self):
         cookie_states = []
@@ -247,6 +249,12 @@ class InstagramScraper:
                     
                     current_time = time.time()
                     
+                    # Check if we've reached the maximum number of consecutive empty users lists
+                    if self.empty_users_count >= self.max_empty_users:
+                        logger.info(f"Received {self.max_empty_users} consecutive empty users lists. Stopping all scraping.")
+                        executor.shutdown(wait=False)
+                        break
+
                     # Save state based on number of followers scraped
                     if self.total_followers_scraped % save_interval == 0:
                         self.save_state()
