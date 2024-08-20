@@ -96,6 +96,10 @@ class InstagramScraper:
         self.max_empty_users = 3
         self.scraping_status = "in_progress"
         self.scraping_stop_reason = None
+        self.last_unique_followers_count = 0
+        self.unchanged_unique_followers_count = 0
+        self.max_unchanged_count = 15
+        self.last_followers_scraped = 0
 
     def initialize_cookie_states(self):
         cookie_states = []
@@ -223,16 +227,17 @@ class InstagramScraper:
                 logger.info(f"Attempting to fetch initial followers with account ID {account_id}")
                 followers = self.fetch_followers(cookie_state, initial_request=True)
                 if followers:
-                    logger.debug(f"Initial followers response: {json.dumps(followers, indent=2)}")
+                    logger.info(f"Initial followers response: {json.dumps(followers, indent=2)}")
                     if 'next_max_id' in followers:
                         next_max_id = followers['next_max_id']
-                        logger.debug(f"next_max_id found: {next_max_id}")
+                        logger.info(f"next_max_id found: {next_max_id}")
                         self.last_max_id = next_max_id
                         self.base_encoded_part = next_max_id
-                        logger.debug(f"Successfully set base_encoded_part to: {self.base_encoded_part}")
+                        logger.info(f"Successfully set base_encoded_part to: {self.base_encoded_part}")
                         return
-                    elif self.current_max_id == '0':
+                    elif followers['users']:
                         logger.info("'next_max_id' not found in response")
+                        self.get_next_max_id = self.current_max_id + self.large_step
                         return
                 else:
                     self.empty_users_count += 1
@@ -342,6 +347,9 @@ class InstagramScraper:
                     logger.debug(f"Starting scrape with account ID {current_account_id}")
 
                     cookie_state = self.check_and_update_cookie(cookie_state)
+                    # Update the cookie_state in self.cookie_states
+                    self.cookie_states[cookie_state.index] = cookie_state
+
                     current_max_id = self.get_next_max_id()
                     logger.debug(f"scrape_with_cookie: Retrieved current_max_id: {current_max_id} for account ID {current_account_id}")
 
@@ -695,16 +703,42 @@ class InstagramScraper:
         total_failures = sum(cs.fail_count for cs in self.cookie_states)
         success_rate = (total_requests - total_failures) / total_requests if total_requests > 0 else 0
         
+        current_unique_followers_count = len(self.unique_followers)
+        
         logger.info(f"-----------------")
         logger.info(f"Performance Monitor:")
         logger.info(f"Total followers scraped: {self.total_followers_scraped}")
-        logger.info(f"Total unique followers scraped: {len(self.unique_followers)}")
+        logger.info(f"Total unique followers scraped: {current_unique_followers_count}")
         logger.info(f"Total requests made: {total_requests}")
         logger.info(f"Success rate: {success_rate:.2%}")
         logger.info(f"Rate limit info: {self.rate_limit_info}")
         logger.info(f"Rate limit counts: {self.rate_limit_counts}")
         logger.info(f'Consecutive empty users lists: {self.empty_users_count}')
         logger.info(f"-----------------")
+
+        if current_unique_followers_count == self.last_unique_followers_count and self.total_followers_scraped == self.last_followers_scraped:
+            self.unchanged_unique_followers_count += 1
+        else:
+            logger.info(f"Unique followers increased. Reset unchanged count from {self.unchanged_unique_followers_count} to 0")
+            self.unchanged_unique_followers_count = 0
+
+        if self.unchanged_unique_followers_count >= 3:
+            logger.warning("Unique followers count unchanged for 3 consecutive checks. Increasing max_id by 500.")
+            current_max_id = int(self.current_max_id.split('|')[0]) if '|' in self.current_max_id else int(self.current_max_id)
+            new_max_id = str(current_max_id + 100)
+            self.update_max_id(new_max_id, manual=True)
+            self.unchanged_unique_followers_count = 0
+
+        if self.unchanged_unique_followers_count >= self.max_unchanged_count:
+            logger.warning(f"Unique followers count unchanged for {self.max_unchanged_count} consecutive checks. Triggering stop event.")
+            self.stop_event.set()
+            self.scraping_status = "stopped"
+            self.scraping_stop_reason = "no_new_unique_followers"
+        else:
+            logger.info(f"Unchanged unique followers count: {self.unchanged_unique_followers_count}")
+
+        self.last_unique_followers_count = current_unique_followers_count
+        self.last_followers_scraped = self.total_followers_scraped
 
         available_accounts = []
         rate_limited_accounts = []
@@ -751,22 +785,16 @@ class InstagramScraper:
             logger.info(f"New cookie found for account ID {account_id}. Updating.")
             logger.info(f'New cookie: {new_cookie}')
             logger.info(f'Current cookie: {cookie_state.cookie}')
-            new_cookie_state = CookieState(
-                new_cookie,
-                cookie_state.proxy,
-                cookie_state.user_agent,
-                cookie_state.index
-            )
-            new_cookie_state.active = True
-            new_cookie_state.fail_count = 0
-            new_cookie_state.requests_this_hour = 0
-            new_cookie_state.hour_start = time.time()
-            new_cookie_state.last_cookie_check = time.time()
+            cookie_state.cookie = new_cookie
+            cookie_state.active = True
+            cookie_state.fail_count = 0
+            cookie_state.requests_this_hour = 0
+            cookie_state.hour_start = time.time()
+            cookie_state.last_cookie_check = time.time()
             self.account_wait_times[account_id] = 30
-            return new_cookie_state
         else:
             logger.debug(f"No new cookie found for account ID {account_id}")
-            return cookie_state
+        return cookie_state
 
 def main():
     import sys

@@ -196,14 +196,13 @@ def main():
             scraping_status = state.get('scraping_status', 'in_progress')
             scraping_stop_reason = state.get('scraping_stop_reason', None)
             
+            scraped_counts[user_id] = scraped_count
+            total_scraped += scraped_count
+            logger.info(f"User ID: {user_id} - Followers already scraped: {scraped_count}")
             if scraping_status in ['completed', 'stopped', 'error']:
                 logger.info(f"Skipping User ID: {user_id} - Status: {scraping_status}, Reason: {scraping_stop_reason}")
                 skipped_user_ids.append(user_id)
                 continue
-            
-            scraped_counts[user_id] = scraped_count
-            total_scraped += scraped_count
-            logger.info(f"User ID: {user_id} - Followers already scraped: {scraped_count}")
         else:
             scraped_counts[user_id] = 0
             logger.info(f"User ID: {user_id} - No previous state found")
