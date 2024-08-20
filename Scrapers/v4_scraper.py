@@ -232,7 +232,8 @@ class InstagramScraper:
                         logger.debug(f"Successfully set base_encoded_part to: {self.base_encoded_part}")
                         return
                     elif self.current_max_id == '0':
-                        logger.debug("'next_max_id' not found in response")
+                        logger.info("'next_max_id' not found in response")
+                        return
                 else:
                     self.empty_users_count += 1
                     logger.info(f"No followers data returned for account ID {account_id}, empty_users_count: {self.empty_users_count}")
@@ -344,13 +345,14 @@ class InstagramScraper:
                     followers = self.fetch_followers(cookie_state, params)
 
                     if followers == "RATE_LIMITED":
-                        logger.info(f"Rate limit reached for account ID {current_account_id}, switching cookie...")
+                        logger.debug(f"Rate limit reached for account ID {current_account_id}, switching cookie...")
                         self.return_cookie_to_pool(cookie_state)
                         
                         new_cookie_state = self.get_next_available_cookie()
                         if new_cookie_state is None:
                             logger.warning("No available cookies. Waiting before retry...")
-                            for _ in range(30):  # Wait in 1-second intervals
+                            for _ in range(5):  # Wait in 1-second intervals
+                                # logger.info(f'Account ID {current_account_id} is waiting for {5 - _} seconds before retrying...')
                                 if self.stop_event.is_set():
                                     logger.info("Stop event detected during wait. Exiting.")
                                     return None
@@ -410,6 +412,7 @@ class InstagramScraper:
                                 logger.info("Stop event detected during cooldown. Exiting.")
                                 return None
                             if self.account_wait_times[current_account_id] > 0:
+                                # logger.info(f'Account ID {current_account_id} is waiting for {self.account_wait_times[current_account_id]} seconds before retrying...')
                                 time.sleep(1)
 
                     elif scraping_complete:
@@ -429,7 +432,7 @@ class InstagramScraper:
         if params is None:
             params = self.params.copy()
         
-        logger.info(f"fetch_followers: Request params: {params}")
+        logger.debug(f"fetch_followers: Request params: {params}")
         
         headers = {
             'User-Agent': 'Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; samsung; SM-G991B; o1s; exynos2100; en_US; 458229258)',
@@ -464,7 +467,7 @@ class InstagramScraper:
         else:
             logger.debug("Not using proxy")
 
-        self.wait_with_jitter()
+        # self.wait_with_jitter()
         backoff_time = 5
         for retry in range(self.max_retries):
             if not cookie_state.can_make_request():
@@ -790,7 +793,7 @@ class InstagramScraper:
             new_cookie_state.requests_this_hour = 0
             new_cookie_state.hour_start = time.time()
             new_cookie_state.last_cookie_check = time.time()
-            self.account_wait_times[account_id] = 0
+            self.account_wait_times[account_id] = 30
             return new_cookie_state
         else:
             logger.debug(f"No new cookie found for account ID {account_id}")
