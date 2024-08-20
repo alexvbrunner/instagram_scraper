@@ -104,6 +104,7 @@ class InstagramScraper:
         self.unchanged_unique_followers_count = 0
         self.max_unchanged_count = 15
         self.last_followers_scraped = 0
+        self.start_time = time.time()
 
     def initialize_cookie_states(self):
         cookie_states = []
@@ -679,7 +680,8 @@ class InstagramScraper:
                 } for cs in self.cookie_states
             },
             'scraping_status': self.scraping_status,
-            'scraping_stop_reason': self.scraping_stop_reason
+            'scraping_stop_reason': self.scraping_stop_reason,
+            'start_time': self.start_time
         }
         with open(f'Files/States/{self.user_id}_state.json', 'w') as f:
             json.dump(state, f)
@@ -704,21 +706,36 @@ class InstagramScraper:
                     cs.hour_start = cs_state['hour_start']
             self.scraping_status = state.get('scraping_status', 'in_progress')
             self.scraping_stop_reason = state.get('scraping_stop_reason', None)
+            self.start_time = state.get('start_time', time.time())
             logger.info(f"State loaded for user {self.user_id}")
         except FileNotFoundError:
             logger.info(f"No previous state found for user {self.user_id}")
 
     def monitor_performance(self):
+        current_time = time.time()
         total_requests = sum(cs.requests_this_hour for cs in self.cookie_states)
         total_failures = sum(cs.fail_count for cs in self.cookie_states)
         success_rate = (total_requests - total_failures) / total_requests if total_requests > 0 else 0
         
         current_unique_followers_count = len(self.unique_followers)
         
+        # Calculate time elapsed in different units
+        time_elapsed_minutes = (current_time - self.start_time) / 60
+        time_elapsed_hours = time_elapsed_minutes / 60
+        time_elapsed_days = time_elapsed_hours / 24
+
+        # Calculate unique users per minute, hour, and day
+        unique_users_per_minute = current_unique_followers_count / time_elapsed_minutes if time_elapsed_minutes > 0 else 0
+        unique_users_per_hour = current_unique_followers_count / time_elapsed_hours if time_elapsed_hours > 0 else 0
+        unique_users_per_day = current_unique_followers_count / time_elapsed_days if time_elapsed_days > 0 else 0
+        
         logger.info(f"-----------------")
         logger.info(f"Performance Monitor:")
         logger.info(f"Total followers scraped: {self.total_followers_scraped}")
         logger.info(f"Total unique followers scraped: {current_unique_followers_count}")
+        logger.info(f"Unique users per minute: {unique_users_per_minute:.2f}")
+        logger.info(f"Unique users per hour: {unique_users_per_hour:.2f}")
+        logger.info(f"Unique users per day: {unique_users_per_day:.2f}")
         logger.info(f"Total requests made: {total_requests}")
         logger.info(f"Success rate: {success_rate:.2%}")
         logger.info(f"Rate limit info: {self.rate_limit_info}")
@@ -726,14 +743,17 @@ class InstagramScraper:
         logger.info(f'Consecutive empty users lists: {self.empty_users_count}')
         logger.info(f"-----------------")
 
-        if current_unique_followers_count == self.last_unique_followers_count and self.total_followers_scraped == self.last_followers_scraped:
-            self.unchanged_unique_followers_count += 1
-        else:
-            logger.info(f"Unique followers increased. Reset unchanged count from {self.unchanged_unique_followers_count} to 0")
+        if current_unique_followers_count > self.last_unique_followers_count:
+            logger.info(f"Unique followers increased from {self.last_unique_followers_count} to {current_unique_followers_count}")
             self.unchanged_unique_followers_count = 0
+        elif current_unique_followers_count == self.last_unique_followers_count:
+            self.unchanged_unique_followers_count += 1
+            logger.info(f"Unique followers unchanged. Consecutive unchanged count: {self.unchanged_unique_followers_count}")
+        else:
+            logger.warning(f"Unique followers decreased from {self.last_unique_followers_count} to {current_unique_followers_count}. This should not happen.")
 
         if self.unchanged_unique_followers_count >= 3:
-            logger.warning("Unique followers count unchanged for 3 consecutive checks. Increasing max_id by 500.")
+            logger.warning("Unique followers count unchanged for 3 consecutive checks. Increasing max_id by 100.")
             current_max_id = int(self.current_max_id.split('|')[0]) if '|' in self.current_max_id else int(self.current_max_id)
             new_max_id = str(current_max_id + 100)
             self.update_max_id(new_max_id, manual=True)
@@ -744,9 +764,7 @@ class InstagramScraper:
             self.stop_event.set()
             self.scraping_status = "stopped"
             self.scraping_stop_reason = "no_new_unique_followers"
-        else:
-            logger.info(f"Unchanged unique followers count: {self.unchanged_unique_followers_count}")
-
+        
         self.last_unique_followers_count = current_unique_followers_count
         self.last_followers_scraped = self.total_followers_scraped
 
