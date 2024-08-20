@@ -31,9 +31,9 @@ class CookieState:
         self.hour_start = time.time()
         self.last_cookie_check = time.time()
         self.is_rate_limited = False
-        self.cooldown_time = 30
-        self.min_cooldown = 1
-        self.max_requests_per_hour = 30
+        self.cooldown_time = 15
+        self.min_cooldown = 0.1
+        self.max_requests_per_hour = 300
         self.rate_limit_start_time = 0
 
     def can_make_request(self):
