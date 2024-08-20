@@ -71,7 +71,7 @@ class InstagramScraper:
         self.last_max_id = "0"
         self.base_encoded_part = ""
         self.global_iteration = 0
-        self.large_step = 200
+        self.large_step = 25
         self.small_step = 25
         self.total_followers_scraped = 0
         self.followers = []
@@ -216,6 +216,10 @@ class InstagramScraper:
             cookie_state = available_cookies.pop(0)
             account_id = self.index_to_account_id[cookie_state.index]
             try:
+                if self.global_iteration < 3:
+                    next_count = (self.global_iteration + 1) * self.large_step
+                    self.global_iteration += 1
+                self.params['max_id'] = str(next_count)
                 logger.info(f"Attempting to fetch initial followers with account ID {account_id}")
                 followers = self.fetch_followers(cookie_state, initial_request=True)
                 if followers:
@@ -341,7 +345,6 @@ class InstagramScraper:
 
                     if followers == "RATE_LIMITED":
                         logger.info(f"Rate limit reached for account ID {current_account_id}, switching cookie...")
-                        self.increment_rate_limit_count(current_account_id)
                         self.return_cookie_to_pool(cookie_state)
                         
                         new_cookie_state = self.get_next_available_cookie()
@@ -379,11 +382,13 @@ class InstagramScraper:
                     self.total_followers_scraped += len(followers['users'])
                     logger.info(f"Total followers scraped: {self.total_followers_scraped}")
                     logger.info(f"Unique followers scraped: {len(self.unique_followers)}")
-                    if self.global_iteration >= 3:
-                        self.global_iteration += 1
+                
 
                     logger.info(f"Cumulative followers scraped: {self.total_followers_scraped}")
                     logger.info(f"Cumulative unique followers scraped: {len(self.unique_followers)}")
+                    self.monitor_performance()
+
+                    
 
             except Exception as e:
                 logger.error(f"Unexpected error in scrape_with_cookie: {str(e)}")
@@ -394,10 +399,8 @@ class InstagramScraper:
 
             finally:
                 if not self.stop_event.is_set():
-                    self.monitor_performance()
                     self.return_cookie_to_pool(cookie_state)
                     logger.debug(f"Putting cookie for account ID {current_account_id} back in the queue")
-
                     if not scraping_complete and not cookie_state.can_make_request():
                         wait_time = self.get_dynamic_wait_time(current_account_id)
                         self.account_wait_times[current_account_id] = wait_time
@@ -496,6 +499,7 @@ class InstagramScraper:
                 
                 if 'users' not in data:
                     logger.warning("'users' key not found in response data. Possible rate limit or API issue.")
+                    self.increment_rate_limit_count(current_account_id)
                     return "RATE_LIMITED"
                 
                 if not data['users']:
@@ -540,6 +544,7 @@ class InstagramScraper:
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 401 and "Please wait" in e.response.text:
                     logger.warning(f"Rate limit hit for account ID {current_account_id}. Signaling to switch cookie.")
+                    self.increment_rate_limit_count(current_account_id)
                     return "RATE_LIMITED"
                 else:
                     logger.error(f"HTTP Error for account ID {current_account_id}, max_id: {params.get('max_id')}: {e}")
@@ -772,6 +777,8 @@ class InstagramScraper:
         new_cookie = self.get_new_cookie_from_db(account_id, cookie_state.cookie)
         if new_cookie and new_cookie != cookie_state.cookie:
             logger.info(f"New cookie found for account ID {account_id}. Updating.")
+            logger.info(f'New cookie: {new_cookie}')
+            logger.info(f'Current cookie: {cookie_state.cookie}')
             new_cookie_state = CookieState(
                 new_cookie,
                 cookie_state.proxy,
