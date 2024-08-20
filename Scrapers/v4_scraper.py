@@ -694,13 +694,13 @@ class InstagramScraper:
             'scraping_status': self.scraping_status,
             'scraping_stop_reason': self.scraping_stop_reason
         }
-        with open(f'{self.user_id}_state.json', 'w') as f:
+        with open(f'Files/States/{self.user_id}_state.json', 'w') as f:
             json.dump(state, f)
         logger.info(f"State saved for user {self.user_id}")
 
     def load_state(self):
         try:
-            with open(f'{self.user_id}_state.json', 'r') as f:
+            with open(f'Files/States/{self.user_id}_state.json', 'r') as f:
                 state = json.load(f)
             self.current_max_id = state['current_max_id']
             self.base_encoded_part = state['base_encoded_part']

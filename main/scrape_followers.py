@@ -118,7 +118,7 @@ class CookieState:
 
 def load_scraped_followers_count(user_id):
     try:
-        with open(f'{user_id}_state.json', 'r') as f:
+        with open(f'Files/States/{user_id}_state.json', 'r') as f:
             state = json.load(f)
         return state.get('total_followers_scraped', 0)
     except FileNotFoundError:
@@ -126,7 +126,7 @@ def load_scraped_followers_count(user_id):
 
 def load_user_state(user_id):
     try:
-        with open(f'{user_id}_state.json', 'r') as f:
+        with open(f'Files/States/{user_id}_state.json', 'r') as f:
             state = json.load(f)
         return state
     except FileNotFoundError:
