@@ -323,19 +323,24 @@ class InstagramScraper:
         self.save_state()
 
     def scrape_with_cookie(self, initial_cookie_state):
-        cookie_state = initial_cookie_state
-        current_account_id = self.index_to_account_id[cookie_state.index]
-        logger.debug(f"Starting scrape_with_cookie for account ID {current_account_id}")
-        last_cookie_check = time.time()
         scraping_complete = False
 
         while not self.stop_event.is_set():
             try:
-                if time.time() - last_cookie_check > self.cookie_check_interval:
-                    cookie_state = self.check_and_update_cookie(cookie_state)
-                    last_cookie_check = time.time()
-
                 with self.request_lock:
+                    cookie_state = self.get_next_available_cookie()
+                    if cookie_state is None:
+                        logger.warning("No available cookies. Waiting before retry...")
+                        for _ in range(5):  # Wait in 1-second intervals
+                            if self.stop_event.is_set():
+                                logger.info("Stop event detected during wait. Exiting.")
+                                return None
+                            time.sleep(1)
+                        continue
+
+                    current_account_id = self.index_to_account_id[cookie_state.index]
+                    logger.debug(f"Starting scrape with account ID {current_account_id}")
+
                     cookie_state = self.check_and_update_cookie(cookie_state)
                     current_max_id = self.get_next_max_id()
                     logger.debug(f"scrape_with_cookie: Retrieved current_max_id: {current_max_id} for account ID {current_account_id}")
@@ -345,23 +350,7 @@ class InstagramScraper:
                     followers = self.fetch_followers(cookie_state, params)
 
                     if followers == "RATE_LIMITED":
-                        logger.debug(f"Rate limit reached for account ID {current_account_id}, switching cookie...")
-                        self.return_cookie_to_pool(cookie_state)
-                        
-                        new_cookie_state = self.get_next_available_cookie()
-                        if new_cookie_state is None:
-                            logger.warning("No available cookies. Waiting before retry...")
-                            for _ in range(5):  # Wait in 1-second intervals
-                                # logger.info(f'Account ID {current_account_id} is waiting for {5 - _} seconds before retrying...')
-                                if self.stop_event.is_set():
-                                    logger.info("Stop event detected during wait. Exiting.")
-                                    return None
-                                time.sleep(1)
-                            continue
-                        
-                        cookie_state = new_cookie_state
-                        current_account_id = self.index_to_account_id[cookie_state.index]
-                        logger.debug(f"Switched to account ID {current_account_id}")
+                        logger.debug(f"Rate limit reached for account ID {current_account_id}, will switch cookie in next iteration")
                         continue
                     elif followers is None:
                         if self.scraping_status == "stopped" and self.scraping_stop_reason == "consecutive_empty_users":
@@ -384,13 +373,8 @@ class InstagramScraper:
                     self.total_followers_scraped += len(followers['users'])
                     logger.info(f"Total followers scraped: {self.total_followers_scraped}")
                     logger.info(f"Unique followers scraped: {len(self.unique_followers)}")
-                
-
                     logger.info(f"Cumulative followers scraped: {self.total_followers_scraped}")
                     logger.info(f"Cumulative unique followers scraped: {len(self.unique_followers)}")
-                    self.monitor_performance()
-
-                    
 
             except Exception as e:
                 logger.error(f"Unexpected error in scrape_with_cookie: {str(e)}")
@@ -403,27 +387,12 @@ class InstagramScraper:
                 if not self.stop_event.is_set():
                     self.return_cookie_to_pool(cookie_state)
                     logger.debug(f"Putting cookie for account ID {current_account_id} back in the queue")
-                    if not scraping_complete and not cookie_state.can_make_request():
-                        wait_time = self.get_dynamic_wait_time(current_account_id)
-                        self.account_wait_times[current_account_id] = wait_time
-                        logger.info(f"Account ID {current_account_id} needs to wait {wait_time:.2f} seconds before next request")
-                        for _ in range(int(wait_time)):  # Wait in 1-second intervals
-                            if self.stop_event.is_set():
-                                logger.info("Stop event detected during cooldown. Exiting.")
-                                return None
-                            if self.account_wait_times[current_account_id] > 0:
-                                # logger.info(f'Account ID {current_account_id} is waiting for {self.account_wait_times[current_account_id]} seconds before retrying...')
-                                time.sleep(1)
-
-                    elif scraping_complete:
-                        logger.info("Scraping complete, skipping final wait.")
-                    else:
-                        logger.debug(f"Account ID {current_account_id} can make a request immediately")
+                    self.monitor_performance()
                 else:
                     logger.info("Scraping stopped by stop event. Exiting fetch_followers.")
                     return None
 
-        logger.debug(f"Exiting scrape_with_cookie for account ID {current_account_id}")
+        logger.debug(f"Exiting scrape_with_cookie")
         return scraping_complete
 
     def fetch_followers(self, cookie_state, params=None, initial_request=False):
