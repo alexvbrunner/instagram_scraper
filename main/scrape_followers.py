@@ -124,6 +124,14 @@ def load_scraped_followers_count(user_id):
     except FileNotFoundError:
         return 0
 
+def load_user_state(user_id):
+    try:
+        with open(f'{user_id}_state.json', 'r') as f:
+            state = json.load(f)
+        return state
+    except FileNotFoundError:
+        return None
+
 def main():
     connection = get_database_connection()
     accounts = get_accounts_from_database(connection)
@@ -177,22 +185,45 @@ def main():
 
     scraped_counts = {}
     total_scraped = 0
+    skipped_user_ids = []
 
     # Load and print initial scraped counts
     logger.info("Initial scraped follower counts:")
     for user_id in user_ids:
-        scraped_count = load_scraped_followers_count(user_id)
-        scraped_counts[user_id] = scraped_count
-        total_scraped += scraped_count
-        logger.info(f"User ID: {user_id} - Followers already scraped: {scraped_count}")
+        state = load_user_state(user_id)
+        if state:
+            scraped_count = state.get('total_followers_scraped', 0)
+            scraping_status = state.get('scraping_status', 'in_progress')
+            scraping_stop_reason = state.get('scraping_stop_reason', None)
+            
+            if scraping_status in ['completed', 'stopped', 'error']:
+                logger.info(f"Skipping User ID: {user_id} - Status: {scraping_status}, Reason: {scraping_stop_reason}")
+                skipped_user_ids.append(user_id)
+                continue
+            
+            scraped_counts[user_id] = scraped_count
+            total_scraped += scraped_count
+            logger.info(f"User ID: {user_id} - Followers already scraped: {scraped_count}")
+        else:
+            scraped_counts[user_id] = 0
+            logger.info(f"User ID: {user_id} - No previous state found")
+
+    # Remove skipped user IDs from the list to scrape
+    user_ids = [uid for uid in user_ids if uid not in skipped_user_ids]
 
     logger.info("Initial scraped follower counts per user ID:")
     logger.info(json.dumps(scraped_counts, indent=2))
     logger.info(f"Initial total scraped followers from all user IDs: {total_scraped}")
+    logger.info(f"Skipped user IDs and reasons:")
+    for uid in skipped_user_ids:
+        state = load_user_state(uid)
+        status = state.get('scraping_status', 'unknown')
+        reason = state.get('scraping_stop_reason', 'unknown')
+        logger.info(f"  User ID: {uid} - Status: {status}, Reason: {reason}")
     logger.info("-" * 50)
 
     for user_id in user_ids:
-        initial_count = scraped_counts[user_id]
+        initial_count = scraped_counts.get(user_id, 0)
         logger.info(f"Starting scrape for User ID: {user_id} - Initial follower count: {initial_count}")
         
         # Prepare account data for v4_scraper.py
@@ -243,11 +274,20 @@ def main():
             continue
 
         # Update scraped count after scraping
-        new_count = load_scraped_followers_count(user_id)
-        scraped_counts[user_id] = new_count
-        total_scraped += (new_count - initial_count)
-        logger.info(f"Finished scraping for User ID: {user_id} - New follower count: {new_count}")
-        logger.info(f"Followers scraped in this session: {new_count - initial_count}")
+        state = load_user_state(user_id)
+        if state:
+            new_count = state.get('total_followers_scraped', 0)
+            scraping_status = state.get('scraping_status', 'in_progress')
+            scraping_stop_reason = state.get('scraping_stop_reason', None)
+            
+            scraped_counts[user_id] = new_count
+            total_scraped += (new_count - initial_count)
+            logger.info(f"Finished scraping for User ID: {user_id} - New follower count: {new_count}")
+            logger.info(f"Followers scraped in this session: {new_count - initial_count}")
+            logger.info(f"Scraping status: {scraping_status}, Reason: {scraping_stop_reason}")
+        else:
+            logger.warning(f"No state file found for User ID: {user_id} after scraping")
+        
         logger.info("-" * 50)
 
     logger.info("Scraping process completed for all user IDs.")
@@ -258,6 +298,7 @@ def main():
     
     # Print the final total sum of scraped users
     logger.info(f"Final total scraped followers from all user IDs: {total_scraped}")
+    logger.info(f"Skipped user IDs: {skipped_user_ids}")
 
 if __name__ == "__main__":
     main()
