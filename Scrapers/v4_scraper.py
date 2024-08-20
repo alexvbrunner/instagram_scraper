@@ -102,9 +102,10 @@ class InstagramScraper:
         self.scraping_stop_reason = None
         self.last_unique_followers_count = 0
         self.unchanged_unique_followers_count = 0
-        self.max_unchanged_count = 15
+        self.max_unchanged_count = 5
         self.last_followers_scraped = 0
         self.start_time = time.time()
+        self.manual_increases = 0
 
     def initialize_cookie_states(self):
         cookie_states = []
@@ -123,6 +124,8 @@ class InstagramScraper:
         current_time = time.time()
         available_cookies = []
         for cookie_state in self.cookie_states:
+            if not cookie_state.active:
+                continue  # Skip inactive accounts
             account_id = self.index_to_account_id[cookie_state.index]
             if cookie_state.can_make_request():
                 available_cookies.append((0, current_time, cookie_state))
@@ -531,7 +534,18 @@ class InstagramScraper:
             except requests.exceptions.Timeout:
                 logger.info(f"Request timed out for account ID {current_account_id}, max_id: {params.get('max_id')}")
             except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 401 and "Please wait" in e.response.text:
+                if e.response.status_code == 400:
+                    response_content = e.response.content.decode('utf-8')
+                    if "challenge_required" in response_content:
+                        logger.error(f"Challenge required for account ID {current_account_id}. Disabling this account for the session.")
+                        cookie_state.active = False
+                        self.save_state()  # Save the updated state
+                        return None  # This will cause the scraper to move to the next account
+                    else:
+                        logger.error(f"HTTP Error 400 for account ID {current_account_id}, max_id: {params.get('max_id')}: {e}")
+                        logger.error(f"Response content: {response_content}")
+                        return None
+                elif e.response.status_code == 401 and "Please wait" in e.response.text:
                     logger.warning(f"Rate limit hit for account ID {current_account_id}. Setting cooldown to 5 minutes.")
                     cookie_state.cooldown_time = max(cookie_state.min_cooldown, 300)  # 5 minutes
                     cookie_state.is_rate_limited = True
@@ -762,8 +776,9 @@ class InstagramScraper:
             new_max_id = str(current_max_id + 100)
             self.update_max_id(new_max_id, manual=True)
             self.unchanged_unique_followers_count = 0
+            self.manual_increases += 1
 
-        if self.unchanged_unique_followers_count >= self.max_unchanged_count:
+        if self.manual_increases >= self.max_unchanged_count:
             logger.warning(f"Unique followers count unchanged for {self.max_unchanged_count} consecutive checks. Triggering stop event.")
             self.stop_event.set()
             self.scraping_status = "stopped"
