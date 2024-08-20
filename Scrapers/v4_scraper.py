@@ -729,10 +729,14 @@ class InstagramScraper:
         unique_users_per_hour = current_unique_followers_count / time_elapsed_hours if time_elapsed_hours > 0 else 0
         unique_users_per_day = current_unique_followers_count / time_elapsed_days if time_elapsed_days > 0 else 0
         
+        # Calculate percentage loss between total and unique followers
+        percentage_loss = ((self.total_followers_scraped - current_unique_followers_count) / self.total_followers_scraped * 100) if self.total_followers_scraped > 0 else 0
+        
         logger.info(f"-----------------")
         logger.info(f"Performance Monitor:")
         logger.info(f"Total followers scraped: {self.total_followers_scraped}")
         logger.info(f"Total unique followers scraped: {current_unique_followers_count}")
+        logger.info(f"Percentage loss: {percentage_loss:.2f}%")
         logger.info(f"Unique users per minute: {unique_users_per_minute:.2f}")
         logger.info(f"Unique users per hour: {unique_users_per_hour:.2f}")
         logger.info(f"Unique users per day: {unique_users_per_day:.2f}")
@@ -746,7 +750,7 @@ class InstagramScraper:
         if current_unique_followers_count > self.last_unique_followers_count:
             logger.info(f"Unique followers increased from {self.last_unique_followers_count} to {current_unique_followers_count}")
             self.unchanged_unique_followers_count = 0
-        elif current_unique_followers_count == self.last_unique_followers_count:
+        elif current_unique_followers_count == self.last_unique_followers_count and self.total_followers_scraped != self.last_followers_scraped:
             self.unchanged_unique_followers_count += 1
             logger.info(f"Unique followers unchanged. Consecutive unchanged count: {self.unchanged_unique_followers_count}")
         else:
