@@ -168,7 +168,7 @@ class InstagramUserDataScraper:
     def scrape_user_data(self):
         total_users = len(self.user_ids)
         last_stats_time = time.time()
-        stats_interval = 300  # Display statistics every 5 minutes
+        stats_interval = 5  # Display statistics every 5 minutes
 
         # Find the starting point based on previously processed users
         start_index = len(self.state['scraped_users']) + len(self.state['skipped_user_ids'])
@@ -267,7 +267,7 @@ class InstagramUserDataScraper:
                 return None
 
         current_account_id = self.index_to_account_id[cookie_state.index]
-        logger.debug(f"Fetching data for user ID {user_id} with account ID {current_account_id}")
+        logger.info(f"Fetching data for user ID {user_id} with account ID {current_account_id}")
         
         cookie_state = self.check_and_update_cookie(cookie_state)
         

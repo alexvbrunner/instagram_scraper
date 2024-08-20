@@ -76,15 +76,21 @@ def get_accounts_from_database(connection):
         logger.error(f"Error fetching accounts from database: {e}")
         sys.exit(1)
 
-def get_user_ids_from_csv(csv_filename):
-    user_ids = []
-    csv_filename = f'Files/{csv_filename}.csv'
-    with open(csv_filename, 'r') as csvfile:
-        csv_reader = csv.DictReader(csvfile)
-        for row in csv_reader:
-            if 'User ID' in row and row['User ID']:
-                user_ids.append(row['User ID'])
-    return user_ids
+def get_user_ids_from_database(connection, csv_filename):
+    try:
+        cursor = connection.cursor()
+        query = """
+        SELECT DISTINCT pk
+        FROM followers
+        WHERE csv_filename = %s
+        """
+        cursor.execute(query, (csv_filename,))
+        user_ids = [str(row[0]) for row in cursor.fetchall()]
+        cursor.close()
+        return user_ids
+    except Error as e:
+        logger.error(f"Error fetching user IDs from database: {e}")
+        return []
 
 def initialize_database():
     try:
@@ -181,10 +187,10 @@ def initialize_database():
 def main():
     connection = get_database_connection()
     accounts = get_accounts_from_database(connection)
-    connection.close()
 
     if not accounts:
         logger.error("No accounts found in the database with Instagram created and valid cookies.")
+        connection.close()
         sys.exit(1)
 
     total_accounts = len(accounts)
@@ -202,11 +208,13 @@ def main():
 
     selected_accounts = random.sample(accounts, num_accounts)
 
-    csv_filename = input("Enter the CSV filename containing user IDs to scrape without the .csv extension: ")
-    user_ids = get_user_ids_from_csv(csv_filename)
+    csv_filename = input("Enter the CSV filename to fetch user IDs from the followers table: ")
+    user_ids = get_user_ids_from_database(connection, csv_filename)
+
+    connection.close()
 
     if not user_ids:
-        logger.error(f"No valid user IDs found in {csv_filename}.csv. Please check the file format.")
+        logger.error(f"No valid user IDs found for csv_filename: {csv_filename}. Please check the database.")
         sys.exit(1)
 
     logger.info(f"Found {len(user_ids)} user IDs to scrape.")
