@@ -72,7 +72,7 @@ class InstagramScraper:
         self.base_encoded_part = ""
         self.global_iteration = 0
         self.large_step = 200
-        self.small_step = 200
+        self.small_step = 25
         self.total_followers_scraped = 0
         self.followers = []
         self.gender_detector = gender_detector.Detector()
@@ -144,9 +144,24 @@ class InstagramScraper:
     def get_next_max_id(self):
         return self.current_max_id
 
-    def update_max_id(self, new_max_id):
-        self.current_max_id = new_max_id
-        logger.debug(f"update_max_id: Updated current_max_id to: {new_max_id}")
+    def update_max_id(self, new_max_id, manual=False):
+
+        if manual == False:
+            self.current_max_id = new_max_id
+            logger.info(f"update_max_id: Updated current_max_id to: {new_max_id}")
+
+        else:
+            # Convert new_max_id to integer
+            new_max_id_int = int(new_max_id)
+            
+            # Calculate the next divisible value
+            remainder = new_max_id_int % self.small_step
+            if remainder != 0:
+                new_max_id_int += self.small_step - remainder
+            
+            # Update current_max_id with the adjusted value
+            self.current_max_id = str(new_max_id_int)
+            logger.info(f"update_max_id: Updated current_max_id to: {self.current_max_id}")
 
     def get_new_cookie_from_db(self, account_id, old_cookie):
         try:
@@ -332,7 +347,11 @@ class InstagramScraper:
                         new_cookie_state = self.get_next_available_cookie()
                         if new_cookie_state is None:
                             logger.warning("No available cookies. Waiting before retry...")
-                            time.sleep(30)
+                            for _ in range(30):  # Wait in 1-second intervals
+                                if self.stop_event.is_set():
+                                    logger.info("Stop event detected during wait. Exiting.")
+                                    return None
+                                time.sleep(1)
                             continue
                         
                         cookie_state = new_cookie_state
@@ -366,15 +385,6 @@ class InstagramScraper:
                     logger.info(f"Cumulative followers scraped: {self.total_followers_scraped}")
                     logger.info(f"Cumulative unique followers scraped: {len(self.unique_followers)}")
 
-                    self.monitor_performance()
-
-                    # if 'next_max_id' in followers:
-                    #     self.update_max_id(followers['next_max_id'])
-                    # else:
-                    #     new_max_id = str(int(current_max_id) + self.params['count'])
-                    #     self.update_max_id(new_max_id)
-                    #     logger.debug(f"No 'next_max_id' found. Incrementing max_id to: {new_max_id}")
-
             except Exception as e:
                 logger.error(f"Unexpected error in scrape_with_cookie: {str(e)}")
                 logger.error(traceback.format_exc())
@@ -384,6 +394,7 @@ class InstagramScraper:
 
             finally:
                 if not self.stop_event.is_set():
+                    self.monitor_performance()
                     self.return_cookie_to_pool(cookie_state)
                     logger.debug(f"Putting cookie for account ID {current_account_id} back in the queue")
 
@@ -391,7 +402,11 @@ class InstagramScraper:
                         wait_time = self.get_dynamic_wait_time(current_account_id)
                         self.account_wait_times[current_account_id] = wait_time
                         logger.info(f"Account ID {current_account_id} needs to wait {wait_time:.2f} seconds before next request")
-                        time.sleep(wait_time)
+                        for _ in range(int(wait_time)):  # Wait in 1-second intervals
+                            if self.stop_event.is_set():
+                                logger.info("Stop event detected during cooldown. Exiting.")
+                                return None
+                            time.sleep(1)
                     elif scraping_complete:
                         logger.info("Scraping complete, skipping final wait.")
                     else:
@@ -453,7 +468,7 @@ class InstagramScraper:
 
             logger.debug(f"Attempt {retry + 1} of {self.max_retries}")
             try:
-                logger.info(f'Trying request with account ID {current_account_id}')
+                logger.info(f'Trying request with account ID {current_account_id} and max_id: {params.get('max_id')}')
                 response = requests.get(self.base_url, params=params, headers=headers, cookies=cookies, proxies=proxies, timeout=30)
                 cookie_state.increment_request_count()
                 logger.info(f"Request status code: {response.status_code}")
@@ -503,12 +518,12 @@ class InstagramScraper:
                     try:
                         if '|' in current_max_id:
                             numeric_part = int(current_max_id.split('|')[0])
-                            new_max_id = str(numeric_part + len(data.get('users', [])))
+                            new_max_id = str(numeric_part + self.small_step)
                         else:
-                            new_max_id = str(int(current_max_id) + len(data.get('users', [])))
+                            new_max_id = str(int(current_max_id) + self.small_step)
                         
                         logger.info(f'Current max_id: {current_max_id}, length of users: {len(data.get("users", []))}, new_max_id: {new_max_id}')
-                        self.update_max_id(new_max_id)
+                        self.update_max_id(new_max_id, manual=True)
                         logger.info(f"Incremented max_id manually to: {new_max_id}")
                         return data
                     except ValueError as e:

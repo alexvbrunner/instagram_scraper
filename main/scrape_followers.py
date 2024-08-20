@@ -255,9 +255,7 @@ def main():
                 account_data_json,
                 db_config_json
             ]
-            
-            logger.info(f"Calling v4_scraper main function with arguments: {v4_scraper_args}")
-            
+                    
             # Temporarily replace sys.argv with our arguments
             original_argv = sys.argv
             sys.argv = ['v4_scraper.py'] + v4_scraper_args
