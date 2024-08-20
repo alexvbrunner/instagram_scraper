@@ -227,7 +227,7 @@ class InstagramScraper:
                         self.base_encoded_part = next_max_id
                         logger.debug(f"Successfully set base_encoded_part to: {self.base_encoded_part}")
                         return
-                    else:
+                    elif self.current_max_id == '0':
                         logger.debug("'next_max_id' not found in response")
                 else:
                     self.empty_users_count += 1
