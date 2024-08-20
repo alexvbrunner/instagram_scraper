@@ -36,14 +36,18 @@ class CookieState:
         self.requests_this_hour = 0
         self.hour_start = time.time()
         self.last_cookie_check = time.time()
+        self.is_rate_limited = False
+        self.cooldown_time = 30  # Default cooldown time in seconds
+        self.min_cooldown = 10  # Minimum cooldown time in seconds
+        self.max_requests_per_hour = 30
 
     def can_make_request(self):
         current_time = time.time()
         if current_time - self.hour_start >= 3600:
             self.requests_this_hour = 0
             self.hour_start = current_time
-        time_since_last_request = current_time - self.last_request_time
-        return self.requests_this_hour < 5 and time_since_last_request >= 300
+        time_since_last_request = max(self.min_cooldown, current_time - self.last_request_time)
+        return self.requests_this_hour < self.max_requests_per_hour and time_since_last_request >= self.cooldown_time
 
     def increment_request_count(self):
         self.requests_this_hour += 1
@@ -122,7 +126,7 @@ class InstagramScraper:
             if cookie_state.can_make_request():
                 available_cookies.append((0, current_time, cookie_state))
             else:
-                wait_time = 300 - (current_time - cookie_state.last_request_time)
+                wait_time = max(cookie_state.min_cooldown, cookie_state.cooldown_time - (current_time - cookie_state.last_request_time))
                 available_cookies.append((wait_time, current_time, cookie_state))
                 self.account_wait_times[account_id] = wait_time
 
@@ -448,7 +452,7 @@ class InstagramScraper:
         backoff_time = 5
         for retry in range(self.max_retries):
             if not cookie_state.can_make_request():
-                logger.debug(f"Rate limit reached for account ID {current_account_id}, signaling to switch cookie...")
+                logger.debug(f"Cooldown not finished for account ID {current_account_id}, signaling to switch cookie...")
                 return "RATE_LIMITED"
 
             logger.debug(f"Attempt {retry + 1} of {self.max_retries}")
@@ -516,6 +520,10 @@ class InstagramScraper:
                         logger.error(f"Unable to increment max_id: {current_max_id}, error: {e}")
                         return None
 
+                # If the request was successful, reset the cooldown time to 30 seconds
+                cookie_state.cooldown_time = max(cookie_state.min_cooldown, 30)
+                cookie_state.is_rate_limited = False
+
                 return data
             
             
@@ -523,7 +531,9 @@ class InstagramScraper:
                 logger.info(f"Request timed out for account ID {current_account_id}, max_id: {params.get('max_id')}")
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 401 and "Please wait" in e.response.text:
-                    logger.warning(f"Rate limit hit for account ID {current_account_id}. Signaling to switch cookie.")
+                    logger.warning(f"Rate limit hit for account ID {current_account_id}. Setting cooldown to 5 minutes.")
+                    cookie_state.cooldown_time = max(cookie_state.min_cooldown, 300)  # 5 minutes
+                    cookie_state.is_rate_limited = True
                     self.increment_rate_limit_count(current_account_id)
                     return "RATE_LIMITED"
                 else:
@@ -749,7 +759,7 @@ class InstagramScraper:
             if cs.can_make_request():
                 available_accounts.append(account_id)
             else:
-                time_until_available = 300 - (current_time - cs.last_request_time)
+                time_until_available = max(cs.min_cooldown, cs.cooldown_time - (current_time - cs.last_request_time))
                 rate_limited_accounts.append((account_id, time_until_available))
 
         logger.info(f"Available accounts: {', '.join(map(str, available_accounts))}")
@@ -768,7 +778,7 @@ class InstagramScraper:
                 available_accounts.append(account_id)
                 self.account_wait_times[account_id] = 0
             else:
-                time_until_available = 300 - (current_time - cs.last_request_time)
+                time_until_available = max(cs.min_cooldown, cs.cooldown_time - (current_time - cs.last_request_time))
                 rate_limited_accounts.append((account_id, time_until_available))
                 self.account_wait_times[account_id] = time_until_available
 
