@@ -331,7 +331,7 @@ class InstagramScraper:
                     last_cookie_check = time.time()
 
                 with self.request_lock:
-                    self.check_and_update_cookie(cookie_state)
+                    cookie_state = self.check_and_update_cookie(cookie_state)
                     current_max_id = self.get_next_max_id()
                     logger.debug(f"scrape_with_cookie: Retrieved current_max_id: {current_max_id} for account ID {current_account_id}")
 
@@ -340,7 +340,7 @@ class InstagramScraper:
                     followers = self.fetch_followers(cookie_state, params)
 
                     if followers == "RATE_LIMITED":
-                        logger.debug(f"Rate limit reached for account ID {current_account_id}, switching cookie...")
+                        logger.info(f"Rate limit reached for account ID {current_account_id}, switching cookie...")
                         self.increment_rate_limit_count(current_account_id)
                         self.return_cookie_to_pool(cookie_state)
                         
@@ -406,7 +406,9 @@ class InstagramScraper:
                             if self.stop_event.is_set():
                                 logger.info("Stop event detected during cooldown. Exiting.")
                                 return None
-                            time.sleep(1)
+                            if self.account_wait_times[current_account_id] > 0:
+                                time.sleep(1)
+
                     elif scraping_complete:
                         logger.info("Scraping complete, skipping final wait.")
                     else:
@@ -424,7 +426,7 @@ class InstagramScraper:
         if params is None:
             params = self.params.copy()
         
-        logger.debug(f"fetch_followers: Request params: {params}")
+        logger.info(f"fetch_followers: Request params: {params}")
         
         headers = {
             'User-Agent': 'Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; samsung; SM-G991B; o1s; exynos2100; en_US; 458229258)',
@@ -453,7 +455,7 @@ class InstagramScraper:
             else:
                 logger.error(f"Invalid proxy format: {cookie_state.proxy}")
 
-        logger.debug(f"Sending request to {self.base_url} with params: {params}")
+        logger.debug(f"+++++++Sending request to {self.base_url} with params: {params}+++++++")
         if self.use_proxies:
             logger.debug(f"Using proxy: {proxies}")
         else:
@@ -468,7 +470,7 @@ class InstagramScraper:
 
             logger.debug(f"Attempt {retry + 1} of {self.max_retries}")
             try:
-                logger.info(f'Trying request with account ID {current_account_id} and max_id: {params.get('max_id')}')
+                logger.info(f'++++++++Trying request with account ID {current_account_id} and max_id: {params.get('max_id')}+++++++++')
                 response = requests.get(self.base_url, params=params, headers=headers, cookies=cookies, proxies=proxies, timeout=30)
                 cookie_state.increment_request_count()
                 logger.info(f"Request status code: {response.status_code}")
@@ -781,6 +783,7 @@ class InstagramScraper:
             new_cookie_state.requests_this_hour = 0
             new_cookie_state.hour_start = time.time()
             new_cookie_state.last_cookie_check = time.time()
+            self.account_wait_times[account_id] = 0
             return new_cookie_state
         else:
             logger.debug(f"No new cookie found for account ID {account_id}")
