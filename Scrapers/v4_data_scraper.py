@@ -35,7 +35,7 @@ class CookieState:
         self.hour_start = time.time()
         self.last_cookie_check = time.time()
         self.is_rate_limited = False
-        self.cooldown_time = 10
+        self.cooldown_time = 5
         self.min_cooldown = 0.1
         self.max_requests_per_hour = 300
         self.rate_limit_start_time = 0
@@ -172,6 +172,7 @@ class InstagramUserDataScraper:
                     self.account_queue.put((max(next_available_time, cookie_state.rate_limit_until), cookie_state))
 
         logger.warning("No available accounts at the moment.")
+        self.display_statistics()
         return None
 
     def return_account_to_queue(self, cookie_state, cooldown=0):
@@ -269,7 +270,12 @@ class InstagramUserDataScraper:
             while not self.user_queue.empty() or futures:
                 while len(futures) < self.max_concurrent_requests and not self.user_queue.empty():
                     user_id = self.user_queue.get()
-                    futures.add(executor.submit(self.process_single_user, user_id))
+                    account = self.get_next_available_account()
+                    if account:
+                        futures.add(executor.submit(self.process_single_user, user_id, account))
+                    else:
+                        self.user_queue.put(user_id)
+                        time.sleep(1)  # Short sleep if no accounts are available
 
                 # Wait for any future to complete
                 done, futures = concurrent.futures.wait(
@@ -294,18 +300,19 @@ class InstagramUserDataScraper:
         logger.info(f"Final total completed user data scrapes: {len(self.state['scraped_users'])}")
         logger.info(f"Total skipped user IDs: {len(self.state['skipped_user_ids'])}")
 
-    def process_single_user(self, user_id):
+    def process_single_user(self, user_id, account):
         logger.info(f"Processing user ID {user_id}")
         retry_count = 0
         max_retries = 3
 
         while retry_count < max_retries:
-            account = self.get_next_available_account()
             if account is None:
-                logger.warning(f"No available accounts. Waiting before retry for user ID {user_id}")
-                self.display_statistics()
-                time.sleep(30)  # Wait for 30 seconds before trying again
-                continue
+                account = self.get_next_available_account()
+                if account is None:
+                    logger.warning(f"No available accounts. Waiting before retry for user ID {user_id}")
+                    time.sleep(5)  # Shorter wait time
+                    retry_count += 1
+                    continue
 
             try:
                 logger.info(f"Using account ID {account.account_id} for user ID {user_id}")
@@ -319,16 +326,16 @@ class InstagramUserDataScraper:
                         with self.processing_lock:
                             self.state['scraped_users'].append(user_id)
                             self.state['total_scraped'] += 1
-                            self.processing_users.discard(user_id)  # Use discard instead of remove
-                            self.record_scrape()  # Record the successful scrape
+                            self.processing_users.discard(user_id)
+                        self.record_scrape()
                         logger.info(f"Successfully scraped data for user ID: {user_id}")
-                        logger.info(f"Session scrape count: {self.session_scrape_count}")  # Log the current count
+                        logger.info(f"Session scrape count: {self.session_scrape_count}")
                         break
                     else:
                         logger.error(f"Failed to process data for user ID: {user_id}")
                         with self.processing_lock:
                             self.state['skipped_user_ids'].append(user_id)
-                            self.processing_users.discard(user_id)  # Use discard instead of remove
+                            self.processing_users.discard(user_id)
                         break
                 else:
                     logger.warning(f"No data found for user ID: {user_id}")
@@ -340,7 +347,9 @@ class InstagramUserDataScraper:
                 retry_count += 1
                 account.set_rate_limit()
             finally:
-                self.return_account_to_queue(account)
+                if account:
+                    self.return_account_to_queue(account)
+                account = None  # Reset account for the next iteration
 
             if retry_count < max_retries:
                 logger.info(f"Retrying user ID {user_id} (Attempt {retry_count + 1}/{max_retries})")
@@ -348,7 +357,7 @@ class InstagramUserDataScraper:
                 logger.warning(f"Max retries reached for user ID: {user_id}")
                 with self.processing_lock:
                     self.state['skipped_user_ids'].append(user_id)
-                    self.processing_users.discard(user_id)  # Use discard instead of remove
+                    self.processing_users.discard(user_id)
 
         self.save_state()
 
