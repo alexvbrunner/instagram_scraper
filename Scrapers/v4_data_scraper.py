@@ -69,6 +69,13 @@ class CookieState:
         self.cooldown_time = max(self.min_cooldown, 300)  # 5 minutes
         logger.warning(f"Rate limit set for account ID {self.account_id}. Cooldown: {self.cooldown_time} seconds")
 
+    def time_until_available(self):
+        current_time = time.time()
+        if self.is_rate_limited:
+            return max(0, self.rate_limit_start_time + self.cooldown_time - current_time)
+        else:
+            return max(0, self.last_request_time + self.cooldown_time - current_time)
+
 class InstagramUserDataScraper:
     def __init__(self, user_ids, csv_filename, account_data, db_config):
         self.user_ids = user_ids
@@ -112,6 +119,8 @@ class InstagramUserDataScraper:
         with self.account_lock:
             current_time = time.time()
             available_accounts = []
+
+            self.display_statistics()
             
             for _ in range(len(self.cookie_states)):
                 if self.account_queue.empty():
@@ -121,20 +130,22 @@ class InstagramUserDataScraper:
 
                 next_available_time, cookie_state = self.account_queue.get()
                 
-                if cookie_state.active and not cookie_state.is_rate_limited:
-                    if next_available_time <= current_time:
-                        # This account is available now
-                        logger.info(f"Using account ID {cookie_state.account_id}")
-                        self.account_wait_times[cookie_state.account_id] = 0
-                        # Put the account back at the end of the queue
-                        self.account_queue.put((current_time, cookie_state))
-                        return cookie_state
-                    else:
-                        # This account will be available later
-                        available_accounts.append((next_available_time, cookie_state))
+                time_until_available = cookie_state.time_until_available()
                 
+                if cookie_state.active and not cookie_state.is_rate_limited and time_until_available <= 0:
+                    # This account is available now
+                    logger.info(f"Using account ID {cookie_state.account_id}")
+                    self.account_wait_times[cookie_state.account_id] = 0
+                    # Put the account back at the end of the queue
+                    self.account_queue.put((current_time, cookie_state))
+                    return cookie_state
+                else:
+                    # This account will be available later
+                    available_accounts.append((current_time + time_until_available, cookie_state))
+            
                 # Put the account back in the queue
-                self.account_queue.put((next_available_time, cookie_state))
+                self.account_queue.put((current_time + time_until_available, cookie_state))
+                self.account_wait_times[cookie_state.account_id] = time_until_available
 
             if available_accounts:
                 # Sort available accounts by next available time
@@ -156,7 +167,6 @@ class InstagramUserDataScraper:
             
             # If we've checked all accounts and none are available, return None
             logger.warning("No available accounts at the moment.")
-            time.sleep(3)
             return None
 
     def return_account_to_queue(self, cookie_state, cooldown=0):
@@ -197,13 +207,11 @@ class InstagramUserDataScraper:
         rate_limited_accounts = []
         for cs in self.cookie_states:
             account_id = self.index_to_account_id[cs.index]
-            if cs.can_make_request() and not cs.is_rate_limited:
-                available_accounts.append(account_id)
-                self.account_wait_times[account_id] = 0
+            time_until_available = cs.time_until_available()
+            if cs.active and not cs.is_rate_limited:
+                available_accounts.append((account_id, time_until_available))
             else:
-                time_until_available = max(cs.min_cooldown, cs.cooldown_time - (current_time - cs.last_request_time))
                 rate_limited_accounts.append((account_id, time_until_available))
-                self.account_wait_times[account_id] = time_until_available
 
         # Estimate time to completion
         remaining_users = total_users - processed_users
@@ -219,10 +227,11 @@ class InstagramUserDataScraper:
         logger.info(f"Average scrapes per minute: {scrapes_per_minute:.2f}")
         logger.info(f"Average scrapes per hour: {scrapes_per_hour:.2f}")
         logger.info(f"Average scrapes per day: {scrapes_per_day:.2f}")
-        logger.info(f"Available accounts: {', '.join(map(str, available_accounts))}")
-        logger.info("Rate-limited accounts:")
-        for account_id, time_until_available in rate_limited_accounts:
-            logger.info(f"  Account ID {account_id}: {time_until_available:.2f} seconds until available")
+        logger.info("Account status:")
+        for account_id, wait_time in available_accounts:
+            logger.info(f"  Account ID {account_id}: Available (wait time: {wait_time:.2f} seconds)")
+        for account_id, wait_time in rate_limited_accounts:
+            logger.info(f"  Account ID {account_id}: Rate-limited (wait time: {wait_time:.2f} seconds)")
         logger.info(f"Estimated time to completion: {completion_time}")
         logger.info(f"Currently processing users: {len(self.processing_users)}")
         logger.info(f"Remaining users in queue: {self.user_queue.qsize()}")
@@ -275,7 +284,7 @@ class InstagramUserDataScraper:
             account = self.get_next_available_account()
             if account is None:
                 logger.warning(f"No available accounts. Waiting before retry for user ID {user_id}")
-                self.display_statistics()
+                # self.display_statistics()
                 time.sleep(5)  # Wait for 5 seconds before trying again
                 continue
 
