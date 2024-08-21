@@ -15,6 +15,7 @@ from queue import Queue, PriorityQueue
 import threading
 from datetime import datetime, timedelta
 from collections import deque
+from mysql.connector.pooling import MySQLConnectionPool
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -38,14 +39,17 @@ class CookieState:
         self.min_cooldown = 0.1
         self.max_requests_per_hour = 300
         self.rate_limit_start_time = 0
+        self.requests_per_minute = 30  # Adjust as needed
+        self.request_times = deque(maxlen=self.requests_per_minute)
 
     def can_make_request(self):
         current_time = time.time()
-        if current_time - self.hour_start >= 3600:
-            self.requests_this_hour = 0
-            self.hour_start = current_time
-        time_since_last_request = max(self.min_cooldown, current_time - self.last_request_time)
-        return self.requests_this_hour < self.max_requests_per_hour and time_since_last_request >= self.cooldown_time
+        while self.request_times and current_time - self.request_times[0] > 60:
+            self.request_times.popleft()
+        return len(self.request_times) < self.requests_per_minute
+
+    def record_request(self):
+        self.request_times.append(time.time())
 
     def increment_request_count(self):
         self.requests_this_hour += 1
@@ -92,7 +96,7 @@ class InstagramUserDataScraper:
         self.account_queue = PriorityQueue()
         self.initialize_account_queue()
         self.account_lock = threading.Lock()
-        self.max_concurrent_requests = min(1, len(self.cookie_states))  # Ensure we don't exceed available accounts
+        self.max_concurrent_requests = min(len(self.cookie_states), 10)  # Adjust the maximum as needed
         self.request_lock = threading.Lock()
         self.account_wait_times = {account['id']: 0 for account in self.account_data}
         self.start_time = time.time()
@@ -105,6 +109,7 @@ class InstagramUserDataScraper:
         self.scrape_times = deque(maxlen=100)  # Store the last 100 scrape times
         self.last_scrape_time = None
         self.session_scrape_count = 0  # New counter for this session's scrapes
+        self.db_pool = MySQLConnectionPool(pool_name="mypool", pool_size=self.max_concurrent_requests, **self.db_config)
 
     def initialize_cookie_states(self):
         cookie_states = []
@@ -122,56 +127,24 @@ class InstagramUserDataScraper:
     def get_next_available_account(self):
         with self.account_lock:
             current_time = time.time()
-            available_accounts = []
-
-            self.display_statistics()
-            
             for _ in range(len(self.cookie_states)):
                 if self.account_queue.empty():
-                    logger.warning("Account queue is empty. Reinitializing...")
                     self.initialize_account_queue()
                     continue
 
                 next_available_time, cookie_state = self.account_queue.get()
-                
                 time_until_available = cookie_state.time_until_available()
-                
+
                 if cookie_state.active and not cookie_state.is_rate_limited and time_until_available <= 0:
-                    # This account is available now
                     logger.info(f"Using account ID {cookie_state.account_id}")
                     self.account_wait_times[cookie_state.account_id] = 0
-                    # Put the account back at the end of the queue
-                    self.account_queue.put((current_time, cookie_state))
+                    self.account_queue.put((current_time + cookie_state.cooldown_time, cookie_state))
                     return cookie_state
-                else:
-                    # This account will be available later
-                    available_accounts.append((current_time + time_until_available, cookie_state))
-            
-                # Put the account back in the queue
-                self.account_queue.put((current_time + time_until_available, cookie_state))
-                self.account_wait_times[cookie_state.account_id] = time_until_available
 
-            if available_accounts:
-                # Sort available accounts by next available time
-                available_accounts.sort(key=lambda x: x[0])
-                next_available_time, chosen_account = available_accounts[0]
-                
-                wait_time = max(0, next_available_time - current_time)
-                if wait_time > 0:
-                    logger.info(f"Waiting {wait_time:.2f} seconds for next available account")
-                    time.sleep(wait_time)
-                
-                logger.info(f"Using account ID {chosen_account.account_id}")
-                self.account_wait_times[chosen_account.account_id] = 0
-                
-                # Put the chosen account at the end of the queue
-                self.account_queue.put((current_time, chosen_account))
-                
-                return chosen_account
-            
-            # If we've checked all accounts and none are available, return None
-            logger.warning("No available accounts at the moment.")
-            return None
+                self.account_queue.put((current_time + time_until_available, cookie_state))
+
+        logger.warning("No available accounts at the moment.")
+        return None
 
     def return_account_to_queue(self, cookie_state, cooldown=0):
         with self.account_lock:
@@ -258,24 +231,21 @@ class InstagramUserDataScraper:
     def scrape_user_data(self):
         total_users = len(self.user_ids)
         last_stats_time = time.time()
-        stats_interval = 1  # Display statistics every x seconds
+        stats_interval = 5  # Display statistics every 5 seconds
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_concurrent_requests) as executor:
-            futures = set()  # Change this to a set
+            futures = set()
             while not self.user_queue.empty() or futures:
                 while len(futures) < self.max_concurrent_requests and not self.user_queue.empty():
                     user_id = self.user_queue.get()
-                    account = self.get_next_available_account()
-                    if account is None:
-                        self.user_queue.put(user_id)  # Put the user_id back in the queue
-                        break
-                    with self.processing_lock:
-                        if user_id not in self.processing_users:
-                            self.processing_users.add(user_id)
-                            futures.add(executor.submit(self.process_single_user, user_id))  # Add to set
+                    futures.add(executor.submit(self.process_single_user, user_id))
 
-                # Wait for the first future to complete
-                done, futures = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                # Wait for any future to complete
+                done, futures = concurrent.futures.wait(
+                    futures, 
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                    timeout=1  # Add a timeout to prevent blocking
+                )
 
                 for future in done:
                     try:
@@ -302,7 +272,7 @@ class InstagramUserDataScraper:
             account = self.get_next_available_account()
             if account is None:
                 logger.warning(f"No available accounts. Waiting before retry for user ID {user_id}")
-                # self.display_statistics()
+                self.display_statistics()
                 time.sleep(5)  # Wait for 5 seconds before trying again
                 continue
 
@@ -396,6 +366,10 @@ class InstagramUserDataScraper:
         return cookie_state
 
     def fetch_user_data(self, user_id, account):
+        if not account.can_make_request():
+            logger.warning(f"Rate limit reached for account ID {account.account_id}")
+            return None
+
         with self.request_lock:
             cookie_state = account
             if cookie_state is None:
@@ -432,6 +406,7 @@ class InstagramUserDataScraper:
 
         try:
             response = requests.get(url, headers=headers, cookies=cookies, proxies=proxies, timeout=30)
+            account.record_request()
             response.raise_for_status()
             data = response.json()
                 
@@ -527,13 +502,16 @@ class InstagramUserDataScraper:
             first_name = name
         return self.gender_detector.get_gender(first_name) if first_name else 'unknown'
 
+    def get_db_connection(self):
+        return self.db_pool.get_connection()
+
     def save_user_data(self, user_data):
         if not user_data:
             logger.error(f"No data to save for user ID: {user_data.get('user_id')}")
             return
 
         try:
-            connection = mysql.connector.connect(**self.db_config)
+            connection = self.get_db_connection()
             cursor = connection.cursor()
 
             # Check if user_id column exists
