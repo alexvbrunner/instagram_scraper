@@ -234,6 +234,9 @@ class InstagramScraper:
                 self.params['max_id'] = str(next_count)
                 logger.info(f"Attempting to fetch initial followers with account ID {account_id}")
                 followers = self.fetch_followers(cookie_state, initial_request=True)
+                if followers == "RATE_LIMITED":
+                    logger.info(f"Rate limit reached for account ID {account_id}, trying next cookie")
+                    continue
                 if followers:
                     logger.info(f"Initial followers response: {json.dumps(followers, indent=2)}")
                     if 'next_max_id' in followers:
@@ -243,9 +246,10 @@ class InstagramScraper:
                         self.base_encoded_part = next_max_id
                         logger.info(f"Successfully set base_encoded_part to: {self.base_encoded_part}")
                         return
-                    elif followers['users']:
+                    elif 'users' in followers and followers['users']:
                         logger.info("'next_max_id' not found in response")
-                        self.get_next_max_id = self.current_max_id + self.large_step
+                        self.current_max_id = str(int(self.current_max_id) + self.large_step)
+                        logger.info(f"Updated current_max_id to: {self.current_max_id}")
                         return
                 else:
                     self.empty_users_count += 1
