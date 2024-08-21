@@ -174,6 +174,7 @@ class InstagramUserDataScraper:
             self.scrape_times.append(current_time - self.last_scrape_time)
         self.last_scrape_time = current_time
         self.session_scrape_count += 1  # Increment the session scrape count
+        logger.debug(f"Recorded scrape. Session scrape count: {self.session_scrape_count}")
 
     def get_average_scrape_rate(self):
         if not self.scrape_times:
@@ -213,7 +214,8 @@ class InstagramUserDataScraper:
 
         logger.info("----- Scraping Statistics -----")
         logger.info(f"Progress: {processed_users}/{total_users} users processed")
-        logger.info(f"Scrapes this session: {self.session_scrape_count}")  # New line
+        logger.info(f"Scrapes this session: {self.session_scrape_count}")
+        logger.debug(f"Debug: session_scrape_count = {self.session_scrape_count}")
         logger.info(f"Elapsed time: {timedelta(seconds=int(elapsed_time))}")
         logger.info(f"Average scrapes per minute: {scrapes_per_minute:.2f}")
         logger.info(f"Average scrapes per hour: {scrapes_per_hour:.2f}")
@@ -279,6 +281,8 @@ class InstagramUserDataScraper:
             logger.info(f"Using account ID {account.account_id} for user ID {user_id}")
             try:
                 user_data = self.fetch_user_data(user_id, account)
+                logger.debug(f"User data: {user_data}")
+                logger.debug(f"User data type: {type(user_data)}")
                 if user_data:
                     processed_data = self.process_user_data(user_data)
                     if processed_data:
@@ -286,17 +290,18 @@ class InstagramUserDataScraper:
                         with self.processing_lock:
                             self.state['scraped_users'].append(user_id)
                             self.state['total_scraped'] += 1
-                            self.scrape_count += 1
-                            self.processing_users.remove(user_id)
+                            self.processing_users.discard(user_id)  # Use discard instead of remove
+                            self.session_scrape_count += 1  # Increment the session scrape count
                         self.record_scrape()  # Record the successful scrape
                         logger.info(f"Successfully scraped data for user ID: {user_id}")
+                        logger.info(f"Session scrape count: {self.session_scrape_count}")  # Log the current count
                         self.return_account_to_queue(account)
                         break
                     else:
                         logger.error(f"Failed to process data for user ID: {user_id}")
                         with self.processing_lock:
                             self.state['skipped_user_ids'].append(user_id)
-                            self.processing_users.remove(user_id)
+                            self.processing_users.discard(user_id)  # Use discard instead of remove
                         self.return_account_to_queue(account)
                         break
                 else:
@@ -315,7 +320,7 @@ class InstagramUserDataScraper:
                 logger.warning(f"Max retries reached for user ID: {user_id}")
                 with self.processing_lock:
                     self.state['skipped_user_ids'].append(user_id)
-                    self.processing_users.remove(user_id)
+                    self.processing_users.discard(user_id)  # Use discard instead of remove
 
         self.save_state()
 
