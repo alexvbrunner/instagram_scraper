@@ -35,12 +35,15 @@ class CookieState:
         self.hour_start = time.time()
         self.last_cookie_check = time.time()
         self.is_rate_limited = False
-        self.cooldown_time = 20
+        self.cooldown_time = 10
         self.min_cooldown = 0.1
         self.max_requests_per_hour = 300
         self.rate_limit_start_time = 0
         self.requests_per_minute = 30  # Adjust as needed
         self.request_times = deque(maxlen=self.requests_per_minute)
+        self.rate_limit_until = 0
+        self.lock = threading.Lock()
+        self.in_use = False
 
     def can_make_request(self):
         current_time = time.time()
@@ -72,14 +75,41 @@ class CookieState:
         self.is_rate_limited = True
         self.rate_limit_start_time = time.time()
         self.cooldown_time = max(self.min_cooldown, 300)  # 5 minutes
+        self.rate_limit_until = time.time() + self.cooldown_time
         logger.warning(f"Rate limit set for account ID {self.account_id}. Cooldown: {self.cooldown_time} seconds")
 
     def time_until_available(self):
         current_time = time.time()
         if self.is_rate_limited:
-            return max(0, self.rate_limit_start_time + self.cooldown_time - current_time)
+            return max(0, self.rate_limit_until - current_time)
         else:
             return max(0, self.last_request_time + self.cooldown_time - current_time)
+
+    def is_rate_limit_expired(self):
+        current_time = time.time()
+        return self.is_rate_limited and current_time - self.rate_limit_start_time >= self.cooldown_time
+
+    def reset_rate_limit(self):
+        self.is_rate_limited = False
+        self.cooldown_time = self.min_cooldown
+        logger.info(f"Rate limit reset for account ID {self.account_id}")
+
+    def is_available(self):
+        current_time = time.time()
+        return (not self.is_rate_limited and 
+                current_time >= self.rate_limit_until and 
+                current_time - self.last_request_time >= self.cooldown_time)
+
+    def acquire(self):
+        with self.lock:
+            if self.in_use or not self.is_available():
+                return False
+            self.in_use = True
+            return True
+
+    def release(self):
+        with self.lock:
+            self.in_use = False
 
 class InstagramUserDataScraper:
     def __init__(self, user_ids, csv_filename, account_data, db_config):
@@ -133,24 +163,23 @@ class InstagramUserDataScraper:
                     continue
 
                 next_available_time, cookie_state = self.account_queue.get()
-                time_until_available = cookie_state.time_until_available()
 
-                if cookie_state.active and not cookie_state.is_rate_limited and time_until_available <= 0:
+                if current_time >= next_available_time and cookie_state.is_available() and cookie_state.acquire():
                     logger.info(f"Using account ID {cookie_state.account_id}")
-                    self.account_wait_times[cookie_state.account_id] = 0
-                    self.account_queue.put((current_time + cookie_state.cooldown_time, cookie_state))
                     return cookie_state
-
-                self.account_queue.put((current_time + time_until_available, cookie_state))
+                else:
+                    # Put the account back in the queue
+                    self.account_queue.put((max(next_available_time, cookie_state.rate_limit_until), cookie_state))
 
         logger.warning("No available accounts at the moment.")
         return None
 
     def return_account_to_queue(self, cookie_state, cooldown=0):
         with self.account_lock:
-            next_available_time = time.time() + cooldown
+            cookie_state.release()
+            next_available_time = max(time.time() + cooldown, cookie_state.rate_limit_until)
             self.account_queue.put((next_available_time, cookie_state))
-            self.account_wait_times[cookie_state.account_id] = cooldown
+            self.account_wait_times[cookie_state.account_id] = max(cooldown, cookie_state.cooldown_time)
             logger.info(f"Account ID {cookie_state.account_id} returned to queue. Next available at: {next_available_time}")
 
     def load_state(self):
@@ -275,11 +304,11 @@ class InstagramUserDataScraper:
             if account is None:
                 logger.warning(f"No available accounts. Waiting before retry for user ID {user_id}")
                 self.display_statistics()
-                time.sleep(5)  # Wait for 5 seconds before trying again
+                time.sleep(30)  # Wait for 30 seconds before trying again
                 continue
 
-            logger.info(f"Using account ID {account.account_id} for user ID {user_id}")
             try:
+                logger.info(f"Using account ID {account.account_id} for user ID {user_id}")
                 user_data = self.fetch_user_data(user_id, account)
                 logger.debug(f"User data: {user_data}")
                 logger.debug(f"User data type: {type(user_data)}")
@@ -291,28 +320,27 @@ class InstagramUserDataScraper:
                             self.state['scraped_users'].append(user_id)
                             self.state['total_scraped'] += 1
                             self.processing_users.discard(user_id)  # Use discard instead of remove
-                            self.session_scrape_count += 1  # Increment the session scrape count
-                        self.record_scrape()  # Record the successful scrape
+                            self.record_scrape()  # Record the successful scrape
                         logger.info(f"Successfully scraped data for user ID: {user_id}")
                         logger.info(f"Session scrape count: {self.session_scrape_count}")  # Log the current count
-                        self.return_account_to_queue(account)
                         break
                     else:
                         logger.error(f"Failed to process data for user ID: {user_id}")
                         with self.processing_lock:
                             self.state['skipped_user_ids'].append(user_id)
                             self.processing_users.discard(user_id)  # Use discard instead of remove
-                        self.return_account_to_queue(account)
                         break
                 else:
                     logger.warning(f"No data found for user ID: {user_id}")
                     retry_count += 1
-                    self.return_account_to_queue(account, cooldown=5)  # Short cooldown for no data
+                    account.set_rate_limit()
             except Exception as e:
                 logger.error(f"Error occurred while scraping User ID {user_id}: {str(e)}")
                 logger.error(traceback.format_exc())
                 retry_count += 1
-                self.return_account_to_queue(account, cooldown=30)  # Longer cooldown for errors
+                account.set_rate_limit()
+            finally:
+                self.return_account_to_queue(account)
 
             if retry_count < max_retries:
                 logger.info(f"Retrying user ID {user_id} (Attempt {retry_count + 1}/{max_retries})")
@@ -373,6 +401,7 @@ class InstagramUserDataScraper:
     def fetch_user_data(self, user_id, account):
         if not account.can_make_request():
             logger.warning(f"Rate limit reached for account ID {account.account_id}")
+            account.set_rate_limit()
             return None
 
         with self.request_lock:
@@ -439,8 +468,8 @@ class InstagramUserDataScraper:
                     return None
             elif e.response.status_code in [401, 429]:
                 logger.warning(f"Rate limit hit for account ID {current_account_id}.")
-                cookie_state.set_rate_limit()
-                return None  # Return None and the rate-limited account ID
+                account.set_rate_limit()
+                return None
             else:
                 logger.error(f"HTTP Error for account ID {current_account_id}, user ID {user_id}: {e}")
                 logger.error(f"Response content: {e.response.content}")
