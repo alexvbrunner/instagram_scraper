@@ -14,6 +14,7 @@ import numpy as np
 from queue import Queue, PriorityQueue
 import threading
 from datetime import datetime, timedelta
+from collections import deque
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -101,6 +102,9 @@ class InstagramUserDataScraper:
             self.user_queue.put(user_id)
         self.processing_users = set()
         self.processing_lock = threading.Lock()
+        self.scrape_times = deque(maxlen=100)  # Store the last 100 scrape times
+        self.last_scrape_time = None
+        self.session_scrape_count = 0  # New counter for this session's scrapes
 
     def initialize_cookie_states(self):
         cookie_states = []
@@ -191,6 +195,19 @@ class InstagramUserDataScraper:
         with open(f'Files/States/{self.csv_filename}_state.json', 'w') as f:
             json.dump(self.state, f)
 
+    def record_scrape(self):
+        current_time = time.time()
+        if self.last_scrape_time is not None:
+            self.scrape_times.append(current_time - self.last_scrape_time)
+        self.last_scrape_time = current_time
+        self.session_scrape_count += 1  # Increment the session scrape count
+
+    def get_average_scrape_rate(self):
+        if not self.scrape_times:
+            return 0
+        average_time_per_scrape = sum(self.scrape_times) / len(self.scrape_times)
+        return 60 / average_time_per_scrape  # scrapes per minute
+
     def display_statistics(self):
         current_time = time.time()
         elapsed_time = current_time - self.start_time
@@ -198,7 +215,7 @@ class InstagramUserDataScraper:
         processed_users = len(self.state['scraped_users']) + len(self.state['skipped_user_ids'])
 
         # Calculate scrape rates
-        scrapes_per_minute = (processed_users / elapsed_time) * 60 if elapsed_time > 0 else 0
+        scrapes_per_minute = self.get_average_scrape_rate()
         scrapes_per_hour = scrapes_per_minute * 60
         scrapes_per_day = scrapes_per_hour * 24
 
@@ -223,6 +240,7 @@ class InstagramUserDataScraper:
 
         logger.info("----- Scraping Statistics -----")
         logger.info(f"Progress: {processed_users}/{total_users} users processed")
+        logger.info(f"Scrapes this session: {self.session_scrape_count}")  # New line
         logger.info(f"Elapsed time: {timedelta(seconds=int(elapsed_time))}")
         logger.info(f"Average scrapes per minute: {scrapes_per_minute:.2f}")
         logger.info(f"Average scrapes per hour: {scrapes_per_hour:.2f}")
@@ -300,6 +318,7 @@ class InstagramUserDataScraper:
                             self.state['total_scraped'] += 1
                             self.scrape_count += 1
                             self.processing_users.remove(user_id)
+                        self.record_scrape()  # Record the successful scrape
                         logger.info(f"Successfully scraped data for user ID: {user_id}")
                         self.return_account_to_queue(account)
                         break
