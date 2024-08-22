@@ -1,7 +1,7 @@
 """
 Instagram User ID Scraper
 
-This script fetches user IDs for Instagram usernames or profile URLs. It uses a single random cookie
+This script fetches user IDs for Instagram usernames or profile URLs. It uses a random proxy
 from the database to make requests to Instagram's API, avoiding rate limiting and IP blocks.
 
 The script reads usernames or URLs from an input file, processes them to extract usernames, fetches the
@@ -27,17 +27,43 @@ import sys
 import time
 import numpy as np
 from requests import ConnectionError, Timeout, RequestException
+import mysql.connector
+from mysql.connector import Error
+import concurrent.futures
+import os
 
 # Global variables
 MIN_REQUEST_INTERVAL = 1
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+MAX_WORKERS = 10
 
-def load_random_cookie(file_path):
-    with open(file_path, 'r') as f:
-        pairs = json.load(f)
-    random_pair = random.choice(pairs)
-    print(f"Using cookie for account: {random_pair['name']}")
-    return random_pair['cookie']
+def get_database_connection():
+    try:
+        connection = mysql.connector.connect(
+            host='127.0.0.1',
+            database='main',
+            user='root',
+            password='password'
+        )
+        return connection
+    except Error as e:
+        print(f"Error connecting to MySQL database: {e}")
+        sys.exit(1)
+
+def get_proxies_from_database(connection):
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT proxy_address, proxy_port, proxy_username, proxy_password
+            FROM accounts 
+            WHERE proxy_address IS NOT NULL
+        """)
+        proxies = cursor.fetchall()
+        cursor.close()
+        return proxies
+    except Error as e:
+        print(f"Error fetching proxies from database: {e}")
+        sys.exit(1)
 
 def extract_username(input_string):
     parsed = urlparse(input_string)
@@ -47,26 +73,10 @@ def extract_username(input_string):
         return input_string.strip()
 
 def wait_with_jitter():
-    activity_type = random.choices(['quick', 'normal', 'engaged'], weights=[0.3, 0.5, 0.2])[0]
-    
-    if activity_type == 'quick':
-        jitter = np.random.exponential(scale=2)
-    elif activity_type == 'normal':
-        jitter = np.random.normal(loc=10, scale=5)
-    else:  # engaged
-        jitter = np.random.normal(loc=30, scale=10)
-
-    # Add micro-breaks
-    if random.random() < 0.1:  # 10% chance of a micro-break
-        jitter += np.random.uniform(60, 300)  # 1-5 minute break
-
-    # Ensure minimum wait time
-    jitter = max(jitter, MIN_REQUEST_INTERVAL)
-
-    print(f"Waiting for {jitter:.2f} seconds.")
+    jitter = np.random.uniform(MIN_REQUEST_INTERVAL, MIN_REQUEST_INTERVAL * 2)
     time.sleep(jitter)
 
-def get_user_id(username, cookie, max_retries=3):
+def get_user_id(username, proxy, max_retries=3):
     url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
     
     headers = {
@@ -76,20 +86,21 @@ def get_user_id(username, cookie, max_retries=3):
         'X-IG-App-ID': '936619743392459'
     }
 
+    proxy_url = f"http://{proxy['proxy_username']}:{proxy['proxy_password']}@{proxy['proxy_address']}:{proxy['proxy_port']}"
+    proxies = {'http': proxy_url, 'https': proxy_url}
+
     for attempt in range(max_retries):
         wait_with_jitter()
         
         print(f"Attempt {attempt + 1} for {username}")
-        print(f"Using cookie: {cookie[:50]}...")  # Print first 50 chars of cookie
+        print(f"Using proxy: {proxy['proxy_address']}:{proxy['proxy_port']}")
 
         try:
-            response = requests.get(url, headers=headers, timeout=15)
+            response = requests.get(url, headers=headers, proxies=proxies, timeout=15)
             print(f"Response status code: {response.status_code}")
-            print(f"Response headers: {response.headers}")
-            print(f"Response content: {response.text[:200]}...")  # Print first 200 chars of response
 
-            if response.status_code == 400 or response.status_code == 401:
-                print(f"Bad Request ({response.status_code}) for {username}. Cookie might be invalid.")
+            if response.status_code in [400, 401, 403, 429]:
+                print(f"Request failed ({response.status_code}) for {username}. Proxy might be blocked.")
                 return None
             
             response.raise_for_status()
@@ -113,32 +124,68 @@ def get_user_id(username, cookie, max_retries=3):
     
     return None
 
-def process_usernames(input_file, output_file, cookie):
+def process_username(args):
+    input_string, proxy = args
+    username = extract_username(input_string)
+    user_id = get_user_id(username, proxy)
+    return input_string, username, user_id
+
+def process_usernames(input_file, output_file, proxies):
     with open(input_file, 'r') as f:
         inputs = [line.strip() for line in f if line.strip()]
     
+    total_inputs = len(inputs)
+    processed_inputs = set()
+    results = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        while len(processed_inputs) < total_inputs:
+            remaining_inputs = [input_string for input_string in inputs if input_string not in processed_inputs]
+            batch = remaining_inputs[:MAX_WORKERS]
+            
+            futures = [executor.submit(process_username, (input_string, random.choice(proxies))) for input_string in batch]
+            
+            for future in concurrent.futures.as_completed(futures):
+                input_string, username, user_id = future.result()
+                processed_inputs.add(input_string)
+                results.append((input_string, username, user_id))
+                print(f"Processed {len(processed_inputs)}/{total_inputs}")
+
+    # Sort results to maintain original order
+    results.sort(key=lambda x: inputs.index(x[0]))
+
     with open(output_file, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['Input', 'Username', 'User ID'])
-        
-        for input_string in inputs:
-            username = extract_username(input_string)
-            user_id = get_user_id(username, cookie)
-            
+        for input_string, username, user_id in results:
             if user_id:
                 writer.writerow([input_string, username, user_id])
                 print(f"Found user ID for {username}: {user_id}")
             else:
                 writer.writerow([input_string, username, ''])
                 print(f"Could not find user ID for {username}")
-            
-            f.flush()
     
     print(f"Results saved to {output_file}")
 
 def main():
-    cookie = load_random_cookie('Files/proxy_cookie_pairs.json')
-    process_usernames('input_usernames.txt', 'Files/user_ids.csv', cookie)
+    connection = get_database_connection()
+    proxies = get_proxies_from_database(connection)
+    connection.close()
+
+    if not proxies:
+        print("No proxies found in the database.")
+        sys.exit(1)
+
+    print(f"Found {len(proxies)} proxies in the database.")
+
+    input_file = 'input_usernames.txt'
+    output_file = 'Files/user_ids.csv'
+
+    if not os.path.exists(input_file):
+        print(f"Input file '{input_file}' not found.")
+        sys.exit(1)
+
+    process_usernames(input_file, output_file, proxies)
 
 if __name__ == "__main__":
     main()
