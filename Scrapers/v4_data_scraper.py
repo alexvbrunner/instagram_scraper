@@ -33,6 +33,7 @@ class CookieState:
         self.rate_limit_until = 0
         self.normal_cooldown = 10  # 10 seconds
         self.rate_limit_cooldown = 300  # 5 minutes
+        self.consecutive_rate_limits = 0  # New attribute to track consecutive rate limits
 
     def can_make_request(self):
         current_time = time.time()
@@ -46,16 +47,37 @@ class CookieState:
     def set_rate_limit(self):
         self.is_rate_limited = True
         self.rate_limit_until = time.time() + self.rate_limit_cooldown
+        self.consecutive_rate_limits += 1  # Increment consecutive rate limits
 
     def reset_rate_limit(self):
         self.is_rate_limited = False
         self.rate_limit_until = 0
+        self.consecutive_rate_limits = 0  # Reset consecutive rate limits when successful
 
     def time_until_available(self):
         current_time = time.time()
         if self.is_rate_limited:
             return max(0, self.rate_limit_until - current_time)
-        return max(0, self.last_request_time + self.normal_cooldown - current_time)
+        return max(0, self.last_request_time + self.wait_with_jitter() - current_time)
+    
+    def wait_with_jitter(self):
+        activity_type = random.choices(['quick', 'normal', 'engaged'], weights=[0.5, 0.3, 0.2])[0]
+        
+        if activity_type == 'quick':
+            jitter = np.random.exponential(scale=2)
+        elif activity_type == 'normal':
+            jitter = np.random.normal(loc=10, scale=5)
+        else:  # engaged
+            jitter = np.random.normal(loc=30, scale=10)
+
+        # Add micro-breaks
+        if random.random() < 0.1:  # 10% chance of a micro-break
+            jitter += np.random.uniform(60, 300)  # 1-5 minute break
+
+        jitter = max(jitter, 0.5)
+
+        logger.debug(f"Waiting for {jitter:.2f} seconds.")
+        return jitter
 
 class InstagramUserDataScraper:
     def __init__(self, user_ids, csv_filename, account_data, db_config):
@@ -85,6 +107,7 @@ class InstagramUserDataScraper:
         self.last_scrape_time = None
         self.session_scrape_count = 0  # New counter for this session's scrapes
         self.db_pool = MySQLConnectionPool(pool_name="mypool", pool_size=self.max_concurrent_requests, **self.db_config)
+        self.disabled_accounts = set()  # New set to keep track of disabled accounts
 
     def initialize_cookie_states(self):
         cookie_states = []
@@ -98,11 +121,11 @@ class InstagramUserDataScraper:
         start_time = time.time()
         while True:
             if not self.account_queue:
-                self.account_queue.extend(self.cookie_states)
+                self.account_queue.extend([cs for cs in self.cookie_states if cs.account_id not in self.disabled_accounts])
 
             for _ in range(len(self.account_queue)):
                 account = self.account_queue.popleft()
-                if account.can_make_request():
+                if account.account_id not in self.disabled_accounts and account.can_make_request():
                     return account
                 self.account_queue.append(account)
 
@@ -178,13 +201,18 @@ class InstagramUserDataScraper:
         logger.info(f"Average scrapes per hour: {scrapes_per_hour:.2f}")
         logger.info(f"Average scrapes per day: {scrapes_per_day:.2f}")
         logger.info("Account status:")
-        for account_id, wait_time in available_accounts:
-            if wait_time > 0:
-                logger.info(f"  Account ID {account_id}: Cooling down (available in {wait_time:.2f} seconds)")
+        for cs in self.cookie_states:
+            account_id = cs.account_id
+            if account_id in self.disabled_accounts:
+                logger.info(f"  Account ID {account_id}: Disabled (3 consecutive rate limits)")
+            elif cs.is_rate_limited:
+                logger.info(f"  Account ID {account_id}: Rate-limited (available in {cs.time_until_available():.2f} seconds)")
             else:
-                logger.info(f"  Account ID {account_id}: Available")
-        for account_id, wait_time in rate_limited_accounts:
-            logger.info(f"  Account ID {account_id}: Rate-limited (available in {wait_time:.2f} seconds)")
+                wait_time = cs.time_until_available()
+                if wait_time > 0:
+                    logger.info(f"  Account ID {account_id}: Cooling down (available in {wait_time:.2f} seconds)")
+                else:
+                    logger.info(f"  Account ID {account_id}: Available")
         logger.info(f"Estimated time to completion: {completion_time}")
         logger.info(f"Currently processing users: {len(self.processing_users)}")
         logger.info(f"Remaining users in queue: {self.user_queue.qsize()}")
@@ -236,7 +264,7 @@ class InstagramUserDataScraper:
         max_retries = 3
 
         while retry_count < max_retries:
-            if account is None:
+            if account is None or account.account_id in self.disabled_accounts:
                 account = self.get_next_available_account()
                 if account is None:
                     logger.warning(f"No available accounts. Waiting before retry for user ID {user_id}")
@@ -271,14 +299,20 @@ class InstagramUserDataScraper:
                     logger.warning(f"No data found for user ID: {user_id}")
                     retry_count += 1
                     account.set_rate_limit()
+                    if account.consecutive_rate_limits >= 3:
+                        logger.warning(f"Account ID {account.account_id} has been rate limited 3 times in a row. Disabling it.")
+                        self.disabled_accounts.add(account.account_id)
             except Exception as e:
                 logger.error(f"Error occurred while scraping User ID {user_id}: {str(e)}")
                 logger.error(traceback.format_exc())
                 retry_count += 1
                 if account:
                     account.set_rate_limit()
+                    if account.consecutive_rate_limits >= 3:
+                        logger.warning(f"Account ID {account.account_id} has been rate limited 3 times in a row. Disabling it.")
+                        self.disabled_accounts.add(account.account_id)
             finally:
-                if account:
+                if account and account.account_id not in self.disabled_accounts:
                     self.account_queue.append(account)
                 account = None  # Reset account for the next iteration
 
@@ -504,6 +538,11 @@ class InstagramUserDataScraper:
                 """)
                 logger.info("Added user_id column to users table")
 
+            # Check if the user already exists
+            check_query = "SELECT COUNT(*) FROM users WHERE user_id = %s"
+            cursor.execute(check_query, (user_data['user_id'],))
+            user_exists = cursor.fetchone()[0] > 0
+
             # Insert data into the users table
             insert_query = """
             INSERT INTO users (
@@ -600,7 +639,11 @@ class InstagramUserDataScraper:
                     cursor.execute(insert_channel_query, channel_data)
 
             connection.commit()
-            logger.info(f"Saved/Updated user data for user ID: {user_data['user_id']}")
+            
+            if user_exists:
+                logger.info(f"Updated user data for user ID: {user_data['user_id']}")
+            else:
+                logger.info(f"Saved new user data for user ID: {user_data['user_id']}")
 
         except Error as e:
             logger.error(f"Error saving user data to database: {e}")
