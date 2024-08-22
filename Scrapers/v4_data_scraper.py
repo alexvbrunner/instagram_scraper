@@ -177,16 +177,19 @@ class InstagramUserDataScraper:
         scrapes_per_hour = scrapes_per_minute * 60
         scrapes_per_day = scrapes_per_hour * 24
 
-        # Calculate available and timeout accounts
+        # Calculate available, cooling down, and rate limited accounts
         available_accounts = []
+        cooling_down_accounts = []
         rate_limited_accounts = []
         for cs in self.cookie_states:
             account_id = cs.account_id
             time_until_available = cs.time_until_available()
             if cs.is_rate_limited:
                 rate_limited_accounts.append((account_id, time_until_available))
+            elif time_until_available > 0:
+                cooling_down_accounts.append((account_id, time_until_available))
             else:
-                available_accounts.append((account_id, time_until_available))
+                available_accounts.append(account_id)
 
         # Estimate time to completion
         remaining_users = total_users - processed_users
@@ -204,6 +207,10 @@ class InstagramUserDataScraper:
         logger.info(f"Average scrapes per hour: {scrapes_per_hour:.2f}")
         logger.info(f"Average scrapes per day: {scrapes_per_day:.2f}")
         logger.info("Account status:")
+        logger.info(f"  Available accounts: {len(available_accounts)}")
+        logger.info(f"  Cooling down accounts: {len(cooling_down_accounts)}")
+        logger.info(f"  Rate-limited accounts: {len(rate_limited_accounts)}")
+        logger.info("Detailed account status:")
         for cs in self.cookie_states:
             account_id = cs.account_id
             if account_id in self.disabled_accounts:

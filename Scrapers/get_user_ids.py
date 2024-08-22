@@ -73,8 +73,7 @@ def get_user_id(username, cookie, max_retries=3):
         'User-Agent': USER_AGENT,
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br',
-        'X-IG-App-ID': '936619743392459',
-        'Cookie': cookie
+        'X-IG-App-ID': '936619743392459'
     }
 
     for attempt in range(max_retries):
