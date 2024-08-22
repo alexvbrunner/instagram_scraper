@@ -44,7 +44,7 @@ def get_accounts_from_database(connection):
         cursor = connection.cursor(dictionary=True)
         
         current_time = datetime.now()
-        cutoff_time = current_time - timedelta(hours=5)
+        cutoff_time = current_time - timedelta(minutes=15)
         
         cursor.execute("""
             SELECT id, proxy_address, proxy_port, proxy_username, proxy_password, 
@@ -61,9 +61,11 @@ def get_accounts_from_database(connection):
         
         valid_accounts = []
         for account in accounts:
-            cookie_time = datetime.strptime(account['cookie_timestamp'], '%Y-%m-%dT%H:%M:%S.%f')
+            cookie_time = account['cookie_timestamp']
+            if isinstance(cookie_time, str):
+                cookie_time = datetime.fromisoformat(cookie_time.replace('T', ' ').split('.')[0])
             age = current_time - cookie_time
-            if age <= timedelta(hours=5):
+            if age <= timedelta(minutes=15):
                 valid_accounts.append(account)
                 logger.info(f"Account ID: {account['id']}, Cookie Age: {age}")
             else:
