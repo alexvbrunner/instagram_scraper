@@ -100,7 +100,8 @@ class InstagramUserDataScraper:
         self.scrape_count = 0
         self.user_queue = Queue()
         for user_id in self.user_ids:
-            self.user_queue.put(user_id)
+            if user_id not in self.state['scraped_users'] and user_id not in self.state['skipped_user_ids']:
+                self.user_queue.put(user_id)
         self.processing_users = set()
         self.processing_lock = threading.Lock()
         self.scrape_times = deque(maxlen=100)  # Store the last 100 scrape times
@@ -108,6 +109,8 @@ class InstagramUserDataScraper:
         self.session_scrape_count = 0  # New counter for this session's scrapes
         self.db_pool = MySQLConnectionPool(pool_name="mypool", pool_size=self.max_concurrent_requests, **self.db_config)
         self.disabled_accounts = set()  # New set to keep track of disabled accounts
+        self.already_scraped_users = set()
+        self.load_already_scraped_users()
 
     def initialize_cookie_states(self):
         cookie_states = []
@@ -649,6 +652,29 @@ class InstagramUserDataScraper:
             logger.error(f"Error saving user data to database: {e}")
             logger.error(f"User data: {user_data}")
 
+        finally:
+            if connection.is_connected():
+                cursor.close()
+                connection.close()
+
+    def load_already_scraped_users(self):
+        try:
+            connection = mysql.connector.connect(**self.db_config)
+            cursor = connection.cursor()
+
+            query = """
+            SELECT username FROM followers
+            WHERE csv_filename = %s
+            """
+            cursor.execute(query, (self.csv_filename,))
+            
+            for (username,) in cursor:
+                self.already_scraped_users.add(username)
+
+            logger.info(f"Loaded {len(self.already_scraped_users)} already scraped users for csv_filename: {self.csv_filename}")
+
+        except Error as e:
+            logger.error(f"Error loading already scraped users: {e}")
         finally:
             if connection.is_connected():
                 cursor.close()
