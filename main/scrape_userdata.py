@@ -94,6 +94,19 @@ def get_user_ids_from_database(connection, csv_filename):
         logger.error(f"Error fetching user IDs from database: {e}")
         return []
 
+def get_user_ids_from_csv(csv_filename):
+    try:
+        with open(csv_filename, 'r') as csvfile:
+            csv_reader = csv.reader(csvfile)
+            user_ids = [row[0] for row in csv_reader if row]  # Assuming user IDs are in the first column
+        return user_ids
+    except FileNotFoundError:
+        logger.error(f"CSV file not found: {csv_filename}")
+        return []
+    except Exception as e:
+        logger.error(f"Error reading CSV file: {e}")
+        return []
+
 def initialize_database():
     try:
         connection = mysql.connector.connect(**db_config)
@@ -210,13 +223,24 @@ def main():
 
     selected_accounts = random.sample(accounts, num_accounts)
 
-    csv_filename = input("Enter the CSV filename to fetch user IDs from the followers table: ")
-    user_ids = get_user_ids_from_database(connection, csv_filename)
+    while True:
+        source = input("Enter 'db' to fetch user IDs from the database or 'csv' to read from a CSV file: ").lower()
+        if source in ['db', 'csv']:
+            break
+        else:
+            logger.error("Please enter either 'db' or 'csv'.")
+
+    if source == 'db':
+        csv_filename = input("Enter the CSV filename to fetch user IDs from the followers table: ")
+        user_ids = get_user_ids_from_database(connection, csv_filename)
+    else:
+        csv_filename = input("Enter the path to the CSV file containing user IDs: ")
+        user_ids = get_user_ids_from_csv(f'Files/{csv_filename}.csv')
 
     connection.close()
 
     if not user_ids:
-        logger.error(f"No valid user IDs found for csv_filename: {csv_filename}. Please check the database.")
+        logger.error(f"No valid user IDs found. Please check the {'database' if source == 'db' else 'CSV file'}.")
         sys.exit(1)
 
     logger.info(f"Found {len(user_ids)} user IDs to scrape.")
