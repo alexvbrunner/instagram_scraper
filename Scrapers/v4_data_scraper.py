@@ -553,60 +553,8 @@ class InstagramUserDataScraper:
             cursor.execute(check_query, (user_data['user_id'],))
             user_exists = cursor.fetchone()[0] > 0
 
-            # Insert data into the users table
-            insert_query = """
-            INSERT INTO users (
-                user_id, username, full_name, biography, follower_count, following_count,
-                media_count, is_private, is_verified, category, external_url,
-                public_email, public_phone_number, is_business, profile_pic_url,
-                hd_profile_pic_url, has_highlight_reels, has_guides,
-                is_interest_account, total_igtv_videos, total_clips_count,
-                total_ar_effects, is_eligible_for_smb_support_flow,
-                is_eligible_for_lead_center, account_type, is_call_to_action_enabled,
-                interop_messaging_user_fbid, has_videos, total_video_count,
-                has_music_on_profile, is_potential_business, is_memorialized, gender,
-                csv_filename
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-            )
-            ON DUPLICATE KEY UPDATE
-                username = VALUES(username),
-                full_name = VALUES(full_name),
-                biography = VALUES(biography),
-                follower_count = VALUES(follower_count),
-                following_count = VALUES(following_count),
-                media_count = VALUES(media_count),
-                is_private = VALUES(is_private),
-                is_verified = VALUES(is_verified),
-                category = VALUES(category),
-                external_url = VALUES(external_url),
-                public_email = VALUES(public_email),
-                public_phone_number = VALUES(public_phone_number),
-                is_business = VALUES(is_business),
-                profile_pic_url = VALUES(profile_pic_url),
-                hd_profile_pic_url = VALUES(hd_profile_pic_url),
-                has_highlight_reels = VALUES(has_highlight_reels),
-                has_guides = VALUES(has_guides),
-                is_interest_account = VALUES(is_interest_account),
-                total_igtv_videos = VALUES(total_igtv_videos),
-                total_clips_count = VALUES(total_clips_count),
-                total_ar_effects = VALUES(total_ar_effects),
-                is_eligible_for_smb_support_flow = VALUES(is_eligible_for_smb_support_flow),
-                is_eligible_for_lead_center = VALUES(is_eligible_for_lead_center),
-                account_type = VALUES(account_type),
-                is_call_to_action_enabled = VALUES(is_call_to_action_enabled),
-                interop_messaging_user_fbid = VALUES(interop_messaging_user_fbid),
-                has_videos = VALUES(has_videos),
-                total_video_count = VALUES(total_video_count),
-                has_music_on_profile = VALUES(has_music_on_profile),
-                is_potential_business = VALUES(is_potential_business),
-                is_memorialized = VALUES(is_memorialized),
-                gender = VALUES(gender),
-                csv_filename = VALUES(csv_filename)
-            """
-
-            user_data_tuple = tuple(user_data.get(field) for field in [
+            # Prepare the fields for insertion/update
+            fields = [
                 'user_id', 'username', 'full_name', 'biography', 'follower_count', 'following_count',
                 'media_count', 'is_private', 'is_verified', 'category', 'external_url',
                 'public_email', 'public_phone_number', 'is_business', 'profile_pic_url',
@@ -617,7 +565,23 @@ class InstagramUserDataScraper:
                 'interop_messaging_user_fbid', 'has_videos', 'total_video_count',
                 'has_music_on_profile', 'is_potential_business', 'is_memorialized', 'gender',
                 'csv_filename'
-            ])
+            ]
+
+            # Create placeholders for SQL query
+            placeholders = ', '.join(['%s'] * len(fields))
+            
+            # Create the UPDATE part of the query
+            update_fields = ', '.join([f"{field} = VALUES({field})" for field in fields if field != 'user_id'])
+            # Insert data into the users table
+            insert_query = f"""
+            INSERT INTO users ({', '.join(fields)})
+            VALUES ({placeholders})
+            ON DUPLICATE KEY UPDATE
+            {update_fields}
+            """
+
+            # Prepare the data tuple
+            user_data_tuple = tuple(user_data.get(field) for field in fields)
 
             cursor.execute(insert_query, user_data_tuple)
 
