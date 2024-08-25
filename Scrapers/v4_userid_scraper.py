@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 from datetime import datetime, timedelta
 import threading
+from mysql.connector.pooling import MySQLConnectionPool
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -21,20 +22,22 @@ class InstagramUserIDScraper:
         self.csv_filename = csv_filename
         self.account_data = json.loads(account_data)
         self.db_config = json.loads(db_config)
-        self.db_pool = mysql.connector.connect(**self.db_config)
+        self.db_pool = MySQLConnectionPool(pool_name="mypool", pool_size=5, **self.db_config)
         self.account_queue = []
         self.account_id_to_index = {}
         self.setup_accounts()
         self.processed_usernames = set()
         self.existing_user_ids = self.load_existing_user_ids()
-        self.account_timeouts = {}  # New attribute to track account timeouts
-        self.account_lock = threading.Lock()  # Add this line
-        self.last_response_text = ""  # Add this line to initialize the attribute
+        self.account_timeouts = {}
+        self.account_lock = threading.Lock()
+        self.last_response_text = ""
 
     def load_existing_user_ids(self):
         existing_user_ids = {}
+        connection = None
+        cursor = None
         try:
-            connection = mysql.connector.connect(**self.db_config)
+            connection = self.db_pool.get_connection()
             cursor = connection.cursor(dictionary=True)
             query = """
             SELECT username, user_id FROM user_ids
@@ -47,8 +50,9 @@ class InstagramUserIDScraper:
         except Error as e:
             logger.error(f"Error loading existing user IDs from database: {e}")
         finally:
-            if connection.is_connected():
+            if cursor:
                 cursor.close()
+            if connection:
                 connection.close()
         return existing_user_ids
 
@@ -71,37 +75,58 @@ class InstagramUserIDScraper:
                     wait_time = (soonest_available - current_time).total_seconds()
                     if wait_time > 0:
                         logger.info(f"All accounts on timeout. Waiting {wait_time:.2f} seconds for next available account.")
+                        self.display_account_status()
                         time.sleep(wait_time)
-                return None
+                    # After waiting, check again for available accounts
+                    available_accounts = [account for account in self.account_queue 
+                                          if account['id'] not in self.account_timeouts or 
+                                          current_time > self.account_timeouts[account['id']]]
+                
+            if available_accounts:
+                account = available_accounts.pop(0)
+                self.account_queue.remove(account)
+                return account
             
-            account = available_accounts.pop(0)
-            self.account_queue.remove(account)
-            return account
+            return None
 
     def display_account_status(self):
         current_time = datetime.now()
-        active_accounts = [account['id'] for account in self.account_queue 
-                           if account['id'] not in self.account_timeouts or 
-                           current_time > self.account_timeouts[account['id']]]
-        cooldown_accounts = [account_id for account_id, timeout in self.account_timeouts.items() 
-                             if current_time <= timeout]
+        active_accounts = []
+        cooldown_accounts = {}
+        
+        for account in self.account_queue:
+            account_id = account['id']
+            if account_id not in self.account_timeouts or current_time > self.account_timeouts[account_id]:
+                active_accounts.append(account_id)
+            else:
+                cooldown_accounts[account_id] = self.account_timeouts[account_id]
         
         logger.info("Account Status:")
         logger.info(f"Active accounts: {', '.join(map(str, active_accounts))}")
-        logger.info(f"Accounts in cooldown: {', '.join(map(str, cooldown_accounts))}")
+        
+        if active_accounts:
+            logger.info("Active account details:")
+            for account_id in active_accounts:
+                if hasattr(self, 'last_jitter_wait'):
+                    remaining_wait = max(0, self.last_jitter_wait - (time.time() - self.last_jitter_time))
+                    logger.info(f"  Account {account_id}: Jitter wait remaining: {remaining_wait:.2f} seconds")
+                else:
+                    logger.info(f"  Account {account_id}: No current jitter wait")
+        
+        if cooldown_accounts:
+            logger.info("Accounts in cooldown:")
+            for account_id, timeout in cooldown_accounts.items():
+                remaining_time = (timeout - current_time).total_seconds()
+                logger.info(f"  Account {account_id}: {remaining_time:.2f} seconds remaining")
+        else:
+            logger.info("No accounts in cooldown")
 
     def get_new_cookie_from_db(self, account_id, old_cookie):
-        if not self.db_pool.is_connected():
-            logger.error("Database connection is not available. Attempting to reconnect...")
-            try:
-                self.db_pool.reconnect(attempts=3, delay=5)
-            except Error as e:
-                logger.error(f"Failed to reconnect to database: {e}")
-                return None
-
+        connection = None
         cursor = None
         try:
-            cursor = self.db_pool.cursor(dictionary=True)
+            connection = self.db_pool.get_connection()
+            cursor = connection.cursor(dictionary=True)
             query = """
             SELECT cookies 
             FROM accounts 
@@ -122,6 +147,9 @@ class InstagramUserIDScraper:
         finally:
             if cursor:
                 cursor.close()
+            if connection:
+                connection.close()
+        return None
 
     def check_and_update_cookie(self, account):
         account_id = account['id']
@@ -187,8 +215,11 @@ class InstagramUserIDScraper:
                 logger.info(f"Response: {self.last_response_text}")
                 return None
         except Exception as e:
-            logger.error(f"Error occurred while fetching user ID for {username}: {str(e)}")
+            logger.error(f"Error occurred while fetching user ID for {username}: {str(e)}.")
             self.last_response_text = str(e)  # Store the error message
+            if "argument of type 'NoneType' is not iterable" in str(e):
+                logger.info(f"Marking {username} as NOT_FOUND due to NoneType error")
+                return "NOT_FOUND"
             return None
 
     def scrape_user_ids(self):
@@ -225,13 +256,25 @@ class InstagramUserIDScraper:
         if processed_count > 0:
             average_time_per_username = elapsed_time / processed_count
             estimated_total_time = average_time_per_username * total_usernames
-            estimated_time_remaining = estimated_total_time - elapsed_time
+            estimated_time_remaining = max(0, estimated_total_time - elapsed_time)
+            
+            # Smooth out the estimate using exponential moving average
+            if not hasattr(self, 'smoothed_estimate'):
+                self.smoothed_estimate = estimated_time_remaining
+            else:
+                alpha = 0.1  # Smoothing factor
+                self.smoothed_estimate = (alpha * estimated_time_remaining) + ((1 - alpha) * self.smoothed_estimate)
             
             logger.info(f"Progress: {processed_count}/{total_usernames} ({progress_percentage:.2f}%)")
-            logger.info(f"Estimated time remaining: {timedelta(seconds=int(estimated_time_remaining))}")
+            logger.info(f"Estimated time remaining: {timedelta(seconds=int(self.smoothed_estimate))}")
         else:
             logger.info(f"Progress: {processed_count}/{total_usernames} ({progress_percentage:.2f}%)")
             logger.info("Estimated time remaining: Calculating...")
+
+        # Add overall progress information
+        if elapsed_time > 0:
+            overall_rate = processed_count / elapsed_time
+            logger.info(f"Overall processing rate: {overall_rate:.2f} usernames/second")
 
     def wait_with_jitter(self):
         activity_type = random.choices(['quick', 'normal', 'engaged'], weights=[0.3, 0.5, 0.2])[0]
@@ -251,6 +294,8 @@ class InstagramUserIDScraper:
         jitter = max(jitter, 15)
 
         logger.info(f"Waiting for {jitter:.2f} seconds.")
+        self.last_jitter_wait = jitter
+        self.last_jitter_time = time.time()
         time.sleep(jitter)
 
     def process_single_username(self, username):
@@ -263,6 +308,7 @@ class InstagramUserIDScraper:
                 account = self.get_next_available_account()
                 if account is None:
                     logger.warning(f"No available accounts. Waiting before retry for username {username}")
+                    self.display_account_status()  # Display account status when no accounts are available
                     time.sleep(5)  # Wait for 5 seconds before checking again
 
             try:
@@ -300,10 +346,13 @@ class InstagramUserIDScraper:
         timeout_until = datetime.now() + timedelta(minutes=5)
         self.account_timeouts[account_id] = timeout_until
         logger.info(f"Account {account_id} set on timeout until {timeout_until}")
+        self.display_account_status()  # Display account status after setting a timeout
 
     def save_user_id(self, username, user_id):
+        connection = None
+        cursor = None
         try:
-            connection = mysql.connector.connect(**self.db_config)
+            connection = self.db_pool.get_connection()
             cursor = connection.cursor()
 
             query = """
@@ -317,8 +366,9 @@ class InstagramUserIDScraper:
         except Error as e:
             logger.error(f"Error saving user ID to database: {e}")
         finally:
-            if connection.is_connected():
+            if cursor:
                 cursor.close()
+            if connection:
                 connection.close()
 
     def save_results(self):
