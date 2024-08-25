@@ -158,7 +158,7 @@ def main():
     db_config_json = json.dumps(db_config)
 
     existing_csv_filename = input("Enter the existing CSV filename (e.g., Files/user_ids.csv): ")
-    existing_csv_filename = f"Files/{existing_csv_filename}.csv"
+    existing_csv_filename = f"{existing_csv_filename}.csv"
     output_filename = f"user_ids_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
     v4_userid_scraper_args = [

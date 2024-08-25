@@ -10,6 +10,7 @@ import mysql.connector
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 from datetime import datetime, timedelta
+import threading
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -25,18 +26,30 @@ class InstagramUserIDScraper:
         self.account_id_to_index = {}
         self.setup_accounts()
         self.processed_usernames = set()
-        self.existing_user_ids = self.load_existing_user_ids(csv_filename)
+        self.existing_user_ids = self.load_existing_user_ids()
         self.account_timeouts = {}  # New attribute to track account timeouts
+        self.account_lock = threading.Lock()  # Add this line
+        self.last_response_text = ""  # Add this line to initialize the attribute
 
-    def load_existing_user_ids(self, csv_filename):
+    def load_existing_user_ids(self):
         existing_user_ids = {}
         try:
-            with open(csv_filename, 'r', newline='') as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    existing_user_ids[row['Username']] = row['User ID']
-        except FileNotFoundError:
-            logger.info(f"Existing CSV file {csv_filename} not found. Starting fresh.")
+            connection = mysql.connector.connect(**self.db_config)
+            cursor = connection.cursor(dictionary=True)
+            query = """
+            SELECT username, user_id FROM user_ids
+            WHERE csv_filename = %s
+            """
+            cursor.execute(query, (self.csv_filename,))
+            for row in cursor.fetchall():
+                existing_user_ids[row['username']] = row['user_id']
+            logger.info(f"Loaded {len(existing_user_ids)} existing user IDs from database.")
+        except Error as e:
+            logger.error(f"Error loading existing user IDs from database: {e}")
+        finally:
+            if connection.is_connected():
+                cursor.close()
+                connection.close()
         return existing_user_ids
 
     def setup_accounts(self):
@@ -46,16 +59,17 @@ class InstagramUserIDScraper:
 
     def get_next_available_account(self):
         current_time = datetime.now()
-        available_accounts = [account for account in self.account_queue 
-                              if account['id'] not in self.account_timeouts or 
-                              current_time > self.account_timeouts[account['id']]]
-        
-        if not available_accounts:
-            return None
-        
-        account = available_accounts.pop(0)
-        self.account_queue.remove(account)
-        return account
+        with self.account_lock:  # Add this line
+            available_accounts = [account for account in self.account_queue 
+                                  if account['id'] not in self.account_timeouts or 
+                                  current_time > self.account_timeouts[account['id']]]
+            
+            if not available_accounts:
+                return None
+            
+            account = available_accounts.pop(0)
+            self.account_queue.remove(account)
+            return account
 
     def display_account_status(self):
         current_time = datetime.now()
@@ -148,6 +162,7 @@ class InstagramUserIDScraper:
 
         try:
             response = requests.get(url, headers=headers, cookies=cookies, proxies=proxies)
+            self.last_response_text = response.text  # Store the response text
             
             if response.status_code == 200:
                 data = response.json()
@@ -162,11 +177,11 @@ class InstagramUserIDScraper:
                 return "NOT_FOUND"
             else:
                 logger.warning(f"Failed to fetch user ID for {username}. Status code: {response.status_code}")
-                logger.info(f"Response: {response.text}")
-                self.last_response_text = response.text
+                logger.info(f"Response: {self.last_response_text}")
                 return None
         except Exception as e:
             logger.error(f"Error occurred while fetching user ID for {username}: {str(e)}")
+            self.last_response_text = str(e)  # Store the error message
             return None
 
     def scrape_user_ids(self):
@@ -180,7 +195,7 @@ class InstagramUserIDScraper:
                 if username not in self.processed_usernames and username not in self.existing_user_ids:
                     futures.append(executor.submit(self.process_single_username, username))
                 elif username in self.existing_user_ids:
-                    logger.info(f"Skipping {username} as it already exists in the CSV file.")
+                    logger.info(f"Skipping {username} as it already exists in the database.")
                     self.processed_usernames.add(username)
                     processed_count += 1
             
@@ -233,11 +248,14 @@ class InstagramUserIDScraper:
 
     def process_single_username(self, username):
         logger.info(f"Processing username {username}")
-        while True:
+        max_retries = 5
+        retries = 0
+        while retries < max_retries:
             account = self.get_next_available_account()
             if account is None:
                 logger.warning(f"No available accounts. Waiting before retry for username {username}")
                 time.sleep(5)
+                retries += 1
                 continue
 
             try:
@@ -252,12 +270,12 @@ class InstagramUserIDScraper:
                     self.processed_usernames.add(username)
                     logger.info(f"Successfully processed username {username}")
                     self.wait_with_jitter()
-                    self.account_queue.append(account)
+                    with self.account_lock:
+                        self.account_queue.append(account)
                     return
                 else:
                     logger.warning(f"Failed to fetch user ID for username {username}")
-                    response_text = self.last_response_text  # Assume this is stored during fetch_user_id
-                    if "User not found" in response_text:
+                    if "User not found" in self.last_response_text:
                         logger.info(f"Username {username} not found. Skipping.")
                         return
                     self.set_account_timeout(account['id'])
@@ -266,7 +284,10 @@ class InstagramUserIDScraper:
                 logger.error(traceback.format_exc())
                 self.set_account_timeout(account['id'])
 
-            self.wait_with_jitter()  # Add jittered wait between retries
+            self.wait_with_jitter()
+            retries += 1
+
+        logger.error(f"Max retries reached for username {username}. Skipping.")
 
     def set_account_timeout(self, account_id):
         timeout_until = datetime.now() + timedelta(minutes=5)
@@ -294,34 +315,35 @@ class InstagramUserIDScraper:
                 connection.close()
 
     def save_results(self):
+        try:
+            connection = mysql.connector.connect(**self.db_config)
+            cursor = connection.cursor()
+
+            query = """
+            INSERT INTO user_ids (username, user_id, csv_filename)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE user_id = VALUES(user_id)
+            """
+            
+            for username, user_id in self.existing_user_ids.items():
+                cursor.execute(query, (username, user_id, self.csv_filename))
+            
+            connection.commit()
+            logger.info(f"Saved {len(self.existing_user_ids)} user IDs to database.")
+        except Error as e:
+            logger.error(f"Error saving results to database: {e}")
+        finally:
+            if connection.is_connected():
+                cursor.close()
+                connection.close()
+
+        # Optionally, you can still write to CSV if needed
         with open(self.csv_filename, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(['Input', 'Username', 'User ID'])
-            
-            # Write existing user IDs
             for username, user_id in self.existing_user_ids.items():
                 writer.writerow([username, username, user_id])
-
-            try:
-                connection = mysql.connector.connect(**self.db_config)
-                cursor = connection.cursor()
-
-                query = """
-                SELECT username, user_id FROM user_ids
-                WHERE csv_filename = %s AND username NOT IN %s
-                """
-                existing_usernames = tuple(self.existing_user_ids.keys()) or ('',)
-                cursor.execute(query, (self.csv_filename, existing_usernames))
-                
-                for row in cursor.fetchall():
-                    writer.writerow([row[0], row[0], row[1]])
-
-            except Error as e:
-                logger.error(f"Error fetching results from database: {e}")
-            finally:
-                if connection.is_connected():
-                    cursor.close()
-                    connection.close()
+        logger.info(f"Saved results to CSV file: {self.csv_filename}")
 
 def main():
     import sys
