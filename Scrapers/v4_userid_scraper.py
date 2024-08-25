@@ -31,6 +31,8 @@ class InstagramUserIDScraper:
         self.account_lock = threading.Lock()
         self.last_response_text = ""
         self.account_jitter_info = {}  # New dictionary to store jitter info per account
+        self.successful_fetches = 0  # Add this line to initialize the counter
+        self.username_tried_accounts = {}  # New dictionary to track tried accounts per username
 
     def load_existing_user_ids(self):
         existing_user_ids = {}
@@ -253,28 +255,28 @@ class InstagramUserIDScraper:
         elapsed_time = time.time() - start_time
         progress_percentage = (processed_count / total_usernames) * 100
         
-        if processed_count > 0:
-            average_time_per_username = elapsed_time / processed_count
-            estimated_total_time = average_time_per_username * total_usernames
-            estimated_time_remaining = max(0, estimated_total_time - elapsed_time)
+        logger.info(f"Progress: {processed_count}/{total_usernames} ({progress_percentage:.2f}%)")
+
+        if elapsed_time > 0:
+            overall_rate = self.successful_fetches / elapsed_time
+            logger.info(f"Overall processing rate: {overall_rate:.2f} successful usernames/second")
+            logger.info(f"Total successful fetches: {self.successful_fetches}")
             
-            # Smooth out the estimate using exponential moving average
-            if not hasattr(self, 'smoothed_estimate'):
-                self.smoothed_estimate = estimated_time_remaining
+            if overall_rate > 0:
+                remaining_usernames = total_usernames - self.successful_fetches
+                estimated_time_remaining = remaining_usernames / overall_rate
+                logger.info(f"Estimated time remaining: {timedelta(seconds=int(estimated_time_remaining))}")
             else:
-                alpha = 0.1  # Smoothing factor
-                self.smoothed_estimate = (alpha * estimated_time_remaining) + ((1 - alpha) * self.smoothed_estimate)
-            
-            logger.info(f"Progress: {processed_count}/{total_usernames} ({progress_percentage:.2f}%)")
-            logger.info(f"Estimated time remaining: {timedelta(seconds=int(self.smoothed_estimate))}")
+                logger.info("Estimated time remaining: Unable to calculate (processing rate is 0)")
         else:
-            logger.info(f"Progress: {processed_count}/{total_usernames} ({progress_percentage:.2f}%)")
             logger.info("Estimated time remaining: Calculating...")
 
-        # Add overall progress information
-        if elapsed_time > 0:
-            overall_rate = processed_count / elapsed_time
-            logger.info(f"Overall processing rate: {overall_rate:.2f} usernames/second")
+        # Display additional information about unsuccessful attempts
+        unsuccessful_attempts = processed_count - self.successful_fetches
+        if unsuccessful_attempts > 0:
+            unsuccessful_rate = unsuccessful_attempts / elapsed_time
+            logger.info(f"Unsuccessful attempts: {unsuccessful_attempts}")
+            logger.info(f"Unsuccessful rate: {unsuccessful_rate:.2f} usernames/second")
 
     def wait_with_jitter(self, account_id):
         activity_type = random.choices(['quick', 'normal', 'engaged'], weights=[0.3, 0.5, 0.2])[0]
@@ -301,6 +303,8 @@ class InstagramUserIDScraper:
         logger.info(f"Processing username {username}")
         max_retries = 5
         retries = 0
+        self.username_tried_accounts[username] = set()  # Initialize set of tried accounts for this username
+
         while retries < max_retries:
             account = None
             while account is None:
@@ -309,6 +313,12 @@ class InstagramUserIDScraper:
                     logger.warning(f"No available accounts. Waiting before retry for username {username}")
                     self.display_account_status()
                     time.sleep(5)
+                elif account['id'] in self.username_tried_accounts[username]:
+                    logger.info(f"Account {account['id']} already tried for {username}, looking for another account")
+                    account = None
+
+            if account:
+                self.username_tried_accounts[username].add(account['id'])
 
             try:
                 self.display_account_status()
@@ -321,6 +331,8 @@ class InstagramUserIDScraper:
                 elif user_id:
                     self.save_user_id(username, user_id)
                     self.processed_usernames.add(username)
+                    with self.account_lock:
+                        self.successful_fetches += 1  # Increment the counter for successful fetches
                     logger.info(f"Successfully processed username {username}")
                     self.wait_with_jitter(account['id'])
                     return
