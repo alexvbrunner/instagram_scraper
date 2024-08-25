@@ -30,6 +30,7 @@ class InstagramUserIDScraper:
         self.account_timeouts = {}
         self.account_lock = threading.Lock()
         self.last_response_text = ""
+        self.account_jitter_info = {}  # New dictionary to store jitter info per account
 
     def load_existing_user_ids(self):
         existing_user_ids = {}
@@ -105,8 +106,9 @@ class InstagramUserIDScraper:
         if active_accounts:
             logger.info("Active account details:")
             for account_id in active_accounts:
-                if hasattr(self, 'last_jitter_wait') and hasattr(self, 'last_jitter_time'):
-                    remaining_wait = max(0, self.last_jitter_wait - (time.time() - self.last_jitter_time))
+                if account_id in self.account_jitter_info:
+                    last_jitter_wait, last_jitter_time = self.account_jitter_info[account_id]
+                    remaining_wait = max(0, last_jitter_wait - (time.time() - last_jitter_time))
                     logger.info(f"  Account {account_id}: Jitter wait remaining: {remaining_wait:.2f} seconds")
                 else:
                     logger.info(f"  Account {account_id}: No current jitter wait")
@@ -274,7 +276,7 @@ class InstagramUserIDScraper:
             overall_rate = processed_count / elapsed_time
             logger.info(f"Overall processing rate: {overall_rate:.2f} usernames/second")
 
-    def wait_with_jitter(self):
+    def wait_with_jitter(self, account_id):
         activity_type = random.choices(['quick', 'normal', 'engaged'], weights=[0.3, 0.5, 0.2])[0]
         
         if activity_type == 'quick':
@@ -291,9 +293,8 @@ class InstagramUserIDScraper:
         # Ensure minimum wait time
         jitter = max(jitter, 15)
 
-        logger.info(f"Waiting for {jitter:.2f} seconds.")
-        self.last_jitter_wait = jitter
-        self.last_jitter_time = time.time()
+        logger.info(f"Waiting for {jitter:.2f} seconds for account {account_id}.")
+        self.account_jitter_info[account_id] = (jitter, time.time())
         time.sleep(jitter)
 
     def process_single_username(self, username):
@@ -306,8 +307,8 @@ class InstagramUserIDScraper:
                 account = self.get_next_available_account()
                 if account is None:
                     logger.warning(f"No available accounts. Waiting before retry for username {username}")
-                    self.display_account_status()  # Display account status when no accounts are available
-                    time.sleep(5)  # Wait for 5 seconds before checking again
+                    self.display_account_status()
+                    time.sleep(5)
 
             try:
                 self.display_account_status()
@@ -315,13 +316,13 @@ class InstagramUserIDScraper:
                 if user_id == "NOT_FOUND":
                     logger.info(f"Username {username} not found. Skipping.")
                     self.processed_usernames.add(username)
-                    self.wait_with_jitter()  # Add a standard timeout
+                    self.wait_with_jitter(account['id'])
                     return
                 elif user_id:
                     self.save_user_id(username, user_id)
                     self.processed_usernames.add(username)
                     logger.info(f"Successfully processed username {username}")
-                    self.wait_with_jitter()
+                    self.wait_with_jitter(account['id'])
                     return
                 else:
                     logger.warning(f"Failed to fetch user ID for username {username}")
@@ -331,7 +332,7 @@ class InstagramUserIDScraper:
                 logger.error(traceback.format_exc())
                 self.set_account_timeout(account['id'])
 
-            self.wait_with_jitter()
+            self.wait_with_jitter(account['id'])
             retries += 1
 
         logger.error(f"Max retries reached for username {username}. Skipping.")
