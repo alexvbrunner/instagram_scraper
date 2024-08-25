@@ -78,14 +78,25 @@ def get_accounts_from_database(connection):
         logger.error(f"Error fetching accounts from database: {e}")
         sys.exit(1)
 
-def get_user_ids_from_database(connection, csv_filename):
+def get_user_ids_from_database(connection, csv_filename, table):
     try:
+        print(f"Getting user IDs from database for {csv_filename} in {table} table")
         cursor = connection.cursor()
-        query = """
-        SELECT DISTINCT pk
-        FROM followers
-        WHERE csv_filename = %s
-        """
+        if table == 'followers':
+            query = """
+            SELECT DISTINCT pk
+            FROM followers
+            WHERE csv_filename = %s
+            """
+        elif table == 'user_ids':
+            query = """
+            SELECT user_id
+            FROM user_ids
+            WHERE csv_filename = %s
+            """
+        else:
+            raise ValueError("Invalid table name")
+        
         cursor.execute(query, (csv_filename,))
         user_ids = [str(row[0]) for row in cursor.fetchall()]
         cursor.close()
@@ -231,8 +242,15 @@ def main():
             logger.error("Please enter either 'db' or 'csv'.")
 
     if source == 'db':
-        csv_filename = input("Enter the CSV filename to fetch user IDs from the followers table: ")
-        user_ids = get_user_ids_from_database(connection, csv_filename)
+        while True:
+            table = input("Enter 'followers' or 'user_ids' to specify which table to fetch user IDs from: ").lower()
+            if table in ['followers', 'user_ids']:
+                break
+            else:
+                logger.error("Please enter either 'followers' or 'user_ids'.")
+        
+        csv_filename = input("Enter the CSV filename to fetch user IDs: ")
+        user_ids = get_user_ids_from_database(connection, csv_filename, table)
     else:
         csv_filename = input("Enter the path to the CSV file containing user IDs: ")
         user_ids = get_user_ids_from_csv(f'Files/{csv_filename}.csv')
