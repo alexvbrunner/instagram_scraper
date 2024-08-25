@@ -25,7 +25,6 @@ class InstagramUserIDScraper:
         self.account_id_to_index = {}
         self.setup_accounts()
         self.processed_usernames = set()
-        self.failed_usernames = set()
         self.existing_user_ids = self.load_existing_user_ids(csv_filename)
         self.account_timeouts = {}  # New attribute to track account timeouts
 
@@ -71,6 +70,15 @@ class InstagramUserIDScraper:
         logger.info(f"Accounts in cooldown: {', '.join(map(str, cooldown_accounts))}")
 
     def get_new_cookie_from_db(self, account_id, old_cookie):
+        if not self.db_pool.is_connected():
+            logger.error("Database connection is not available. Attempting to reconnect...")
+            try:
+                self.db_pool.reconnect(attempts=3, delay=5)
+            except Error as e:
+                logger.error(f"Failed to reconnect to database: {e}")
+                return None
+
+        cursor = None
         try:
             cursor = self.db_pool.cursor(dictionary=True)
             query = """
@@ -91,8 +99,8 @@ class InstagramUserIDScraper:
         except Error as e:
             logger.error(f"Error fetching new cookie from database: {e}")
         finally:
-            cursor.close()
-        return None
+            if cursor:
+                cursor.close()
 
     def check_and_update_cookie(self, account):
         account_id = account['id']
@@ -138,18 +146,34 @@ class InstagramUserIDScraper:
             'https': f"http://{account['proxy_username']}:{account['proxy_password']}@{account['proxy_address']}:{account['proxy_port']}"
         }
 
-        response = requests.get(url, headers=headers, cookies=cookies, proxies=proxies)
-        
-        if response.status_code == 200:
-            data = response.json()
-            user_id = data['data']['user']['id']
-            return user_id
-        else:
-            logger.warning(f"Failed to fetch user ID for {username}. Status code: {response.status_code}")
-            logger.info(f"Response: {response.text}")
+        try:
+            response = requests.get(url, headers=headers, cookies=cookies, proxies=proxies)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'data' in data and 'user' in data['data'] and 'id' in data['data']['user']:
+                    user_id = data['data']['user']['id']
+                    return user_id
+                else:
+                    logger.warning(f"User data not found for {username}")
+                    return "NOT_FOUND"
+            elif response.status_code == 404:
+                logger.info(f"Username {username} not found (404 error)")
+                return "NOT_FOUND"
+            else:
+                logger.warning(f"Failed to fetch user ID for {username}. Status code: {response.status_code}")
+                logger.info(f"Response: {response.text}")
+                self.last_response_text = response.text
+                return None
+        except Exception as e:
+            logger.error(f"Error occurred while fetching user ID for {username}: {str(e)}")
             return None
 
     def scrape_user_ids(self):
+        start_time = time.time()
+        total_usernames = len(self.usernames)
+        processed_count = 0
+
         with ThreadPoolExecutor(max_workers=len(self.account_data)) as executor:
             futures = []
             for username in self.usernames:
@@ -158,17 +182,34 @@ class InstagramUserIDScraper:
                 elif username in self.existing_user_ids:
                     logger.info(f"Skipping {username} as it already exists in the CSV file.")
                     self.processed_usernames.add(username)
+                    processed_count += 1
             
-            total_usernames = len(futures)
+            total_to_process = len(futures)
             for i, future in enumerate(as_completed(futures), 1):
                 future.result()
-                if i % 10 == 0 or i == total_usernames:  # Display status every 10 usernames or at the end
+                processed_count += 1
+                
+                if i % 10 == 0 or i == total_to_process:
                     self.display_account_status()
+                    self.display_progress(processed_count, total_usernames, start_time)
 
         self.save_results()
         logger.info(f"Scraping completed. Processed {len(self.processed_usernames)} usernames.")
-        if self.failed_usernames:
-            logger.warning(f"Failed to scrape {len(self.failed_usernames)} usernames.")
+
+    def display_progress(self, processed_count, total_usernames, start_time):
+        elapsed_time = time.time() - start_time
+        progress_percentage = (processed_count / total_usernames) * 100
+        
+        if processed_count > 0:
+            average_time_per_username = elapsed_time / processed_count
+            estimated_total_time = average_time_per_username * total_usernames
+            estimated_time_remaining = estimated_total_time - elapsed_time
+            
+            logger.info(f"Progress: {processed_count}/{total_usernames} ({progress_percentage:.2f}%)")
+            logger.info(f"Estimated time remaining: {timedelta(seconds=int(estimated_time_remaining))}")
+        else:
+            logger.info(f"Progress: {processed_count}/{total_usernames} ({progress_percentage:.2f}%)")
+            logger.info("Estimated time remaining: Calculating...")
 
     def wait_with_jitter(self):
         activity_type = random.choices(['quick', 'normal', 'engaged'], weights=[0.3, 0.5, 0.2])[0]
@@ -192,39 +233,39 @@ class InstagramUserIDScraper:
 
     def process_single_username(self, username):
         logger.info(f"Processing username {username}")
-        retry_count = 0
-        max_retries = 3
-
-        while retry_count < max_retries:
+        while True:
             account = self.get_next_available_account()
             if account is None:
                 logger.warning(f"No available accounts. Waiting before retry for username {username}")
                 time.sleep(5)
-                retry_count += 1
                 continue
 
             try:
                 user_id = self.fetch_user_id(username, account)
-                if user_id:
+                if user_id == "NOT_FOUND":
+                    logger.info(f"Username {username} not found. Skipping.")
+                    self.processed_usernames.add(username)
+                    return
+                elif user_id:
                     self.save_user_id(username, user_id)
                     self.processed_usernames.add(username)
                     logger.info(f"Successfully processed username {username}")
-                    self.wait_with_jitter()  # Add jittered wait after successful request
+                    self.wait_with_jitter()
                     self.account_queue.append(account)
                     return
                 else:
                     logger.warning(f"Failed to fetch user ID for username {username}")
+                    response_text = self.last_response_text  # Assume this is stored during fetch_user_id
+                    if "User not found" in response_text:
+                        logger.info(f"Username {username} not found. Skipping.")
+                        return
                     self.set_account_timeout(account['id'])
             except Exception as e:
                 logger.error(f"Error occurred while scraping username {username}: {str(e)}")
                 logger.error(traceback.format_exc())
                 self.set_account_timeout(account['id'])
-                retry_count += 1
 
             self.wait_with_jitter()  # Add jittered wait between retries
-
-        self.failed_usernames.add(username)
-        logger.warning(f"Max retries reached for username: {username}")
 
     def set_account_timeout(self, account_id):
         timeout_until = datetime.now() + timedelta(minutes=5)
