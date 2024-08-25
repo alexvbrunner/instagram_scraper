@@ -23,7 +23,6 @@ class InstagramUserIDScraper:
         self.account_data = json.loads(account_data)
         self.db_config = json.loads(db_config)
         self.db_pool = MySQLConnectionPool(pool_name="mypool", pool_size=5, **self.db_config)
-        self.account_queue = []
         self.account_id_to_index = {}
         self.setup_accounts()
         self.processed_usernames = set()
@@ -58,13 +57,12 @@ class InstagramUserIDScraper:
 
     def setup_accounts(self):
         for i, account in enumerate(self.account_data):
-            self.account_queue.append(account)
             self.account_id_to_index[account['id']] = i
 
     def get_next_available_account(self):
         current_time = datetime.now()
         with self.account_lock:
-            available_accounts = [account for account in self.account_queue 
+            available_accounts = [account for account in self.account_data 
                                   if account['id'] not in self.account_timeouts or 
                                   current_time > self.account_timeouts[account['id']]]
             
@@ -72,19 +70,18 @@ class InstagramUserIDScraper:
                 # If no accounts are available, find the soonest one to become available
                 if self.account_timeouts:
                     soonest_available = min(self.account_timeouts.values())
-                    wait_time = (soonest_available - current_time).total_seconds()
+                    wait_time = max(0, (soonest_available - current_time).total_seconds())
                     if wait_time > 0:
                         logger.info(f"All accounts on timeout. Waiting {wait_time:.2f} seconds for next available account.")
                         self.display_account_status()
                         time.sleep(wait_time)
                     # After waiting, check again for available accounts
-                    available_accounts = [account for account in self.account_queue 
+                    available_accounts = [account for account in self.account_data 
                                           if account['id'] not in self.account_timeouts or 
                                           current_time > self.account_timeouts[account['id']]]
                 
             if available_accounts:
-                account = available_accounts.pop(0)
-                self.account_queue.remove(account)
+                account = random.choice(available_accounts)
                 return account
             
             return None
@@ -94,12 +91,13 @@ class InstagramUserIDScraper:
         active_accounts = []
         cooldown_accounts = {}
         
-        for account in self.account_queue:
-            account_id = account['id']
-            if account_id not in self.account_timeouts or current_time > self.account_timeouts[account_id]:
-                active_accounts.append(account_id)
-            else:
-                cooldown_accounts[account_id] = self.account_timeouts[account_id]
+        with self.account_lock:
+            for account in self.account_data:
+                account_id = account['id']
+                if account_id not in self.account_timeouts or current_time > self.account_timeouts[account_id]:
+                    active_accounts.append(account_id)
+                else:
+                    cooldown_accounts[account_id] = self.account_timeouts[account_id]
         
         logger.info("Account Status:")
         logger.info(f"Active accounts: {', '.join(map(str, active_accounts))}")
@@ -107,7 +105,7 @@ class InstagramUserIDScraper:
         if active_accounts:
             logger.info("Active account details:")
             for account_id in active_accounts:
-                if hasattr(self, 'last_jitter_wait'):
+                if hasattr(self, 'last_jitter_wait') and hasattr(self, 'last_jitter_time'):
                     remaining_wait = max(0, self.last_jitter_wait - (time.time() - self.last_jitter_time))
                     logger.info(f"  Account {account_id}: Jitter wait remaining: {remaining_wait:.2f} seconds")
                 else:
@@ -116,7 +114,7 @@ class InstagramUserIDScraper:
         if cooldown_accounts:
             logger.info("Accounts in cooldown:")
             for account_id, timeout in cooldown_accounts.items():
-                remaining_time = (timeout - current_time).total_seconds()
+                remaining_time = max(0, (timeout - current_time).total_seconds())
                 logger.info(f"  Account {account_id}: {remaining_time:.2f} seconds remaining")
         else:
             logger.info("No accounts in cooldown")
@@ -318,16 +316,12 @@ class InstagramUserIDScraper:
                     logger.info(f"Username {username} not found. Skipping.")
                     self.processed_usernames.add(username)
                     self.wait_with_jitter()  # Add a standard timeout
-                    with self.account_lock:
-                        self.account_queue.append(account)
                     return
                 elif user_id:
                     self.save_user_id(username, user_id)
                     self.processed_usernames.add(username)
                     logger.info(f"Successfully processed username {username}")
                     self.wait_with_jitter()
-                    with self.account_lock:
-                        self.account_queue.append(account)
                     return
                 else:
                     logger.warning(f"Failed to fetch user ID for username {username}")
@@ -344,7 +338,8 @@ class InstagramUserIDScraper:
 
     def set_account_timeout(self, account_id):
         timeout_until = datetime.now() + timedelta(minutes=5)
-        self.account_timeouts[account_id] = timeout_until
+        with self.account_lock:
+            self.account_timeouts[account_id] = timeout_until
         logger.info(f"Account {account_id} set on timeout until {timeout_until}")
         self.display_account_status()  # Display account status after setting a timeout
 
