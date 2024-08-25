@@ -271,6 +271,9 @@ class InstagramUserIDScraper:
                 if user_id == "NOT_FOUND":
                     logger.info(f"Username {username} not found. Skipping.")
                     self.processed_usernames.add(username)
+                    self.wait_with_jitter()  # Add a standard timeout
+                    with self.account_lock:
+                        self.account_queue.append(account)
                     return
                 elif user_id:
                     self.save_user_id(username, user_id)
@@ -282,9 +285,6 @@ class InstagramUserIDScraper:
                     return
                 else:
                     logger.warning(f"Failed to fetch user ID for username {username}")
-                    if "User not found" in self.last_response_text:
-                        logger.info(f"Username {username} not found. Skipping.")
-                        return
                     self.set_account_timeout(account['id'])
             except Exception as e:
                 logger.error(f"Error occurred while scraping username {username}: {str(e)}")
