@@ -189,7 +189,7 @@ class InstagramUserIDScraper:
                 future.result()
                 processed_count += 1
                 
-                if i % 10 == 0 or i == total_to_process:
+                if i % 2 == 0 or i == total_to_process:
                     self.display_account_status()
                     self.display_progress(processed_count, total_usernames, start_time)
 
@@ -241,6 +241,7 @@ class InstagramUserIDScraper:
                 continue
 
             try:
+                self.display_account_status()
                 user_id = self.fetch_user_id(username, account)
                 if user_id == "NOT_FOUND":
                     logger.info(f"Username {username} not found. Skipping.")
