@@ -127,6 +127,9 @@ def main():
     selected_accounts = random.sample(accounts, num_accounts)
 
     input_filename = input("Enter the input filename containing usernames (e.g., input_usernames.txt): ")
+    if input_filename == "":
+        input_filename = "input_usernames.txt"
+    print(f"Input filename: {input_filename}")
     usernames = get_usernames_from_file(input_filename)
 
     if not usernames:

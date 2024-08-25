@@ -59,12 +59,19 @@ class InstagramUserIDScraper:
 
     def get_next_available_account(self):
         current_time = datetime.now()
-        with self.account_lock:  # Add this line
+        with self.account_lock:
             available_accounts = [account for account in self.account_queue 
                                   if account['id'] not in self.account_timeouts or 
                                   current_time > self.account_timeouts[account['id']]]
             
             if not available_accounts:
+                # If no accounts are available, find the soonest one to become available
+                if self.account_timeouts:
+                    soonest_available = min(self.account_timeouts.values())
+                    wait_time = (soonest_available - current_time).total_seconds()
+                    if wait_time > 0:
+                        logger.info(f"All accounts on timeout. Waiting {wait_time:.2f} seconds for next available account.")
+                        time.sleep(wait_time)
                 return None
             
             account = available_accounts.pop(0)
@@ -251,12 +258,12 @@ class InstagramUserIDScraper:
         max_retries = 5
         retries = 0
         while retries < max_retries:
-            account = self.get_next_available_account()
-            if account is None:
-                logger.warning(f"No available accounts. Waiting before retry for username {username}")
-                time.sleep(5)
-                retries += 1
-                continue
+            account = None
+            while account is None:
+                account = self.get_next_available_account()
+                if account is None:
+                    logger.warning(f"No available accounts. Waiting before retry for username {username}")
+                    time.sleep(5)  # Wait for 5 seconds before checking again
 
             try:
                 self.display_account_status()
