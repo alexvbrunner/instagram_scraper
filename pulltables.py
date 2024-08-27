@@ -20,10 +20,10 @@ def connect_to_database():
         print(f"Error connecting to MySQL database: {e}")
     return None
 
-def get_table_data(connection, table_name):
+def get_table_data(connection, table_name, csv_filename):
     try:
         cursor = connection.cursor()
-        cursor.execute(f"SELECT * FROM {table_name}")
+        cursor.execute(f"SELECT * FROM {table_name} WHERE csv_filename = %s", (csv_filename,))
         headers = [i[0] for i in cursor.description]
         rows = cursor.fetchall()
         return headers, rows
@@ -55,12 +55,15 @@ def main():
         tables_to_export = input("Enter table names to export (comma-separated): ").split(',')
         tables_to_export = [table.strip() for table in tables_to_export]
 
+        # Get specific csv_filename from user
+        csv_filename = input("Enter the specific csv_filename to filter rows: ").strip()
+
         for table in tables_to_export:
-            headers, rows = get_table_data(connection, table)
+            headers, rows = get_table_data(connection, table, csv_filename)
             if headers and rows:
                 export_to_csv(table, headers, rows)
             else:
-                print(f"No data found for table {table}")
+                print(f"No data found for table {table} with csv_filename '{csv_filename}'")
 
     except Error as e:
         print(f"Error: {e}")
