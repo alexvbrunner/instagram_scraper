@@ -33,12 +33,12 @@ def get_table_data(connection, table_name, csv_filename):
         if cursor:
             cursor.close()
 
-def export_to_csv(table_name, headers, rows):
+def export_to_csv(table_name, headers, rows, csv_filename):
     output_dir = 'exported_data'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
-    filename = os.path.join(output_dir, f"{table_name}.csv")
+    filename = os.path.join(output_dir, f"{csv_filename}")
     with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(headers)
@@ -61,7 +61,7 @@ def main():
         for table in tables_to_export:
             headers, rows = get_table_data(connection, table, csv_filename)
             if headers and rows:
-                export_to_csv(table, headers, rows)
+                export_to_csv(table, headers, rows, csv_filename)
             else:
                 print(f"No data found for table {table} with csv_filename '{csv_filename}'")
 
