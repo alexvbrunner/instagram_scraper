@@ -33,6 +33,7 @@ class InstagramUserIDScraper:
         self.account_jitter_info = {}  # New dictionary to store jitter info per account
         self.successful_fetches = 0  # Add this line to initialize the counter
         self.username_tried_accounts = {}  # New dictionary to track tried accounts per username
+        self.new_user_ids = {}  # Add this line to store newly scraped user IDs
 
     def load_existing_user_ids(self):
         existing_user_ids = {}
@@ -250,6 +251,7 @@ class InstagramUserIDScraper:
 
         self.save_results()
         logger.info(f"Scraping completed. Processed {len(self.processed_usernames)} usernames.")
+        return self.new_user_ids  # Add this line to return the newly scraped user IDs
 
     def display_progress(self, processed_count, total_usernames, start_time):
         elapsed_time = time.time() - start_time
@@ -331,6 +333,7 @@ class InstagramUserIDScraper:
                 elif user_id:
                     self.save_user_id(username, user_id)
                     self.processed_usernames.add(username)
+                    self.new_user_ids[username] = user_id  # Add this line
                     with self.account_lock:
                         self.successful_fetches += 1  # Increment the counter for successful fetches
                     logger.info(f"Successfully processed username {username}")
