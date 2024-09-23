@@ -181,6 +181,10 @@ class InstagramTaggedScraper:
             return None
 
     def check_post_for_tag_in_post_data(self, post):
+        if not isinstance(post, dict):
+            logger.warning("Invalid post data structure")
+            return False
+
         # Check 'usertags'
         usertags = post.get('usertags', {}).get('in', [])
         for tag in usertags:
@@ -196,9 +200,12 @@ class InstagramTaggedScraper:
                 return True
 
         # Check mentions in 'caption'
-        caption_text = post.get('caption', {}).get('text', '')
-        if f"@{self.target_username}" in caption_text.lower():
-            return True
+        caption = post.get('caption')
+        if caption and isinstance(caption, dict):
+            caption_text = caption.get('text', '')
+            if f"@{self.target_username}" in caption_text.lower():
+                return True
+        # If 'caption' is None or not a dict, skip this check
 
         return False
 
@@ -236,6 +243,9 @@ class InstagramTaggedScraper:
                 else:
                     tagged_posts = []
                     for post in posts:
+                        if not post:
+                            logger.warning(f"Encountered None post in posts for user ID {user_id} (Username: {username})")
+                            continue
                         if self.check_post_for_tag_in_post_data(post):
                             tagged_posts.append(post['id'])
                     
