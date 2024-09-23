@@ -170,8 +170,8 @@ class InstagramTaggedScraper:
             response = requests.get(url, headers=headers, cookies=cookies, proxies=proxies)
             if response.status_code == 200:
                 data = response.json()
-                print(f'Posts for user {user_id}:')
-                pprint(data)
+                # print(f'Posts for user {user_id}:')
+                # pprint(data)
                 return data['items']  # Return full post data
             else:
                 logger.warning(f"Failed to fetch posts for user {user_id}. Status code: {response.status_code}")

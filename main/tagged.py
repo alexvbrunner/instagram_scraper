@@ -321,7 +321,7 @@ def main():
     user_data = {str(user_id): username for username, user_id in user_ids.items()}
 
     # Define csv_filename
-    csv_filename = f"tagged_posts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    csv_filename = f"tagged_posts/tagged_posts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
     # Run tagged scraper
     if user_data:
