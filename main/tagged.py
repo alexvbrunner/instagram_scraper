@@ -144,56 +144,61 @@ def extract_usernames(tasks):
             usernames.append(instagram_handle)
     return usernames
 
-def load_existing_user_ids():
-    try:
-        with open('user_ids.json', 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
-def save_user_ids(user_ids):
-    with open('user_ids.json', 'w') as f:
-        json.dump(user_ids, f)
-
 def get_user_ids(usernames, account_data, db_config):
-    existing_user_ids = load_existing_user_ids()
-    new_usernames = [username for username in usernames if username not in existing_user_ids]
-    
-    if new_usernames:
-        csv_filename = f"user_ids_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        scraper = InstagramUserIDScraper(new_usernames, csv_filename, json.dumps(account_data), json.dumps(db_config))
-        scraper.scrape_user_ids()
-        
-        # Retry for any usernames that failed to get a user ID
-        max_retries = 3
-        retry_count = 0
-        while retry_count < max_retries:
-            failed_usernames = [username for username, user_id in scraper.existing_user_ids.items() if user_id is None]
-            if not failed_usernames:
-                break
+    user_ids = {}
+    connection = None
+    cursor = None
+    try:
+        connection = mysql.connector.connect(**db_config)
+        cursor = connection.cursor(dictionary=True)
+
+        # Prepare the query
+        placeholders = ', '.join(['%s'] * len(usernames))
+        query = f"""
+        SELECT username, user_id 
+        FROM user_ids 
+        WHERE username IN ({placeholders})
+        """
+
+        # Execute the query
+        cursor.execute(query, tuple(usernames))
+
+        # Fetch all results
+        results = cursor.fetchall()
+
+        # Process results
+        for row in results:
+            user_ids[row['username']] = row['user_id']
+
+        logger.info(f"Retrieved {len(user_ids)} user IDs from database")
+
+        # Identify usernames without user IDs
+        missing_usernames = set(usernames) - set(user_ids.keys())
+        if missing_usernames:
+            logger.warning(f"Missing user IDs for {len(missing_usernames)} usernames. Scraping them now.")
             
-            logger.info(f"Retrying {len(failed_usernames)} usernames (Attempt {retry_count + 1}/{max_retries})")
-            retry_scraper = InstagramUserIDScraper(failed_usernames, csv_filename, json.dumps(account_data), json.dumps(db_config))
-            retry_scraper.scrape_user_ids()
+            # Scrape missing user IDs
+            csv_filename = f"user_ids_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            scraper = InstagramUserIDScraper(list(missing_usernames), csv_filename, json.dumps(account_data), json.dumps(db_config))
+            new_user_ids = scraper.scrape_user_ids()
             
-            # Update the existing_user_ids with successful retries
-            scraper.existing_user_ids.update(retry_scraper.existing_user_ids)
-            retry_count += 1
-        
-        # Update existing_user_ids with newly scraped IDs
-        existing_user_ids.update(scraper.existing_user_ids)
-        save_user_ids(existing_user_ids)
-    
-    # If there are still failed usernames after all retries, log them
-    final_failed_usernames = [username for username in usernames if username not in existing_user_ids or existing_user_ids[username] is None]
-    if final_failed_usernames:
-        logger.error(f"Failed to get user IDs for {len(final_failed_usernames)} usernames after all retries: {', '.join(final_failed_usernames)}")
-    
-    # Return only the user IDs for the requested usernames
-    return {username: existing_user_ids.get(username) for username in usernames if existing_user_ids.get(username) is not None}
+            # Update user_ids with newly scraped IDs
+            user_ids.update(new_user_ids)
+            
+            logger.info(f"Scraped {len(new_user_ids)} new user IDs")
+
+    except Error as e:
+        logger.error(f"Error querying user IDs from database: {e}")
+    finally:
+        if cursor:
+            cursor.close()
+        if connection and connection.is_connected():
+            connection.close()
+
+    return user_ids
 
 def get_target_user_id(username, account_data, db_config):
-    existing_user_ids = load_existing_user_ids()
+    existing_user_ids = get_user_ids([username], account_data, db_config)
     if username in existing_user_ids:
         logger.info(f"Found existing user ID for target username {username}")
         return existing_user_ids[username]
@@ -210,7 +215,6 @@ def get_target_user_id(username, account_data, db_config):
         if user_id:
             logger.info(f"Successfully retrieved user ID for target username {username}")
             existing_user_ids[username] = user_id
-            save_user_ids(existing_user_ids)
             return user_id
         
         retry_count += 1
@@ -220,10 +224,21 @@ def get_target_user_id(username, account_data, db_config):
     logger.error(f"Failed to get user ID for target username {username} after {max_retries} attempts")
     return None
 
-def run_tagged_scraper(user_ids, target_user_id, account_data, db_config):
-    csv_filename = f"tagged_posts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    scraper = InstagramTaggedScraper(user_ids, target_user_id, csv_filename, json.dumps(account_data), json.dumps(db_config))
-    scraper.scrape_tagged_posts()
+def update_clickup_status(task_id, new_status):
+    headers = {
+        "Authorization": CLICKUP_API_KEY,
+        "Content-Type": "application/json"
+    }
+    url = f"https://api.clickup.com/api/v2/task/{task_id}"
+    data = {
+        "status": new_status
+    }
+    try:
+        response = requests.put(url, headers=headers, json=data)
+        response.raise_for_status()
+        logger.info(f"Updated task {task_id} status to {new_status}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error updating ClickUp task status: {str(e)}")
 
 def main():
     connection = get_database_connection()
@@ -288,26 +303,50 @@ def main():
         logger.info("No tasks found with Instagram handles and 'check posting' status.")
         return
 
-    logger.info(f"Found {len(usernames)} usernames to scrape.")
+    logger.info(f"Found {len(usernames)} usernames to process.")
 
-    # Get user IDs
+    # Get user IDs (from database and scrape if necessary)
     user_ids = get_user_ids(usernames, account_data, db_config)
 
     # Get target user ID
-    target_user_id = get_target_user_id(target_username, account_data, db_config)
+    target_user_id = get_user_ids([target_username], account_data, db_config).get(target_username)
     
     if not target_user_id:
-        logger.error(f"Could not find user ID for username: {target_username}. Exiting.")
+        logger.error(f"Could not find or scrape user ID for target username: {target_username}. Exiting.")
         return
 
     logger.info(f"Target user ID for {target_username}: {target_user_id}")
 
+    # Prepare user_data for tagged scraper
+    user_data = {str(user_id): username for username, user_id in user_ids.items()}
+
+    # Define csv_filename
+    csv_filename = f"tagged_posts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
     # Run tagged scraper
-    if user_ids:
-        run_tagged_scraper(list(user_ids.values()), target_user_id, account_data, db_config)
+    if user_data:
+        scraper = InstagramTaggedScraper(user_data, target_user_id, target_username, csv_filename, json.dumps(account_data), json.dumps(db_config))
+        logger.info(f"Scraping tagged posts for {len(user_data)} users")
+        logger.info(f"Using accounts with IDs: {', '.join(str(id) for id in scraper.account_id_to_index.keys())}")
+        scraper.display_account_status()
+        scraper.scrape_tagged_posts()
+        successful_taggers = scraper.successful_taggers
         logger.info("Tagged post scraping process completed.")
+
+        # Update ClickUp status for successful taggers
+        for task in tasks:
+            custom_fields = task.get('custom_fields', [])
+            instagram_handle = next((field.get('value') for field in custom_fields 
+                                     if field['id'] == "0aa99d2a-335a-429a-adde-3cd0a1a78d0a" and field.get('value')), None)
+            if instagram_handle:
+                user_id = user_ids.get(instagram_handle)
+                if user_id and str(user_id) in successful_taggers:
+                    update_clickup_status(task['id'], "aftercare")
+                    logger.info(f"Updated ClickUp status to 'aftercare' for user {instagram_handle} (ID: {user_id})")
+
     else:
         logger.warning("No user IDs found to scrape tagged posts. Skipping tagged post scraping.")
+
 
 if __name__ == "__main__":
     main()

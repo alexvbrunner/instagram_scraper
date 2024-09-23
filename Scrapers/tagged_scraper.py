@@ -1,4 +1,5 @@
 import json
+from pprint import pprint
 import time
 import requests
 import csv
@@ -17,9 +18,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class InstagramTaggedScraper:
-    def __init__(self, user_ids, target_user_id, csv_filename, account_data, db_config):
-        self.user_ids = user_ids
-        self.target_user_id = target_user_id
+    def __init__(self, user_data, target_user_id, target_username, csv_filename, account_data, db_config):
+        self.user_data = user_data  # This should be a dict with user_id as key and username as value
+        self.target_user_id = str(target_user_id)
+        self.target_username = target_username.lower()
         self.csv_filename = csv_filename
         self.account_data = json.loads(account_data)
         self.db_config = json.loads(db_config)
@@ -34,6 +36,7 @@ class InstagramTaggedScraper:
         self.account_jitter_info = {}
         self.successful_fetches = 0
         self.user_tried_accounts = {}
+        self.successful_taggers = set()
 
     def setup_accounts(self):
         for i, account in enumerate(self.account_data):
@@ -167,7 +170,9 @@ class InstagramTaggedScraper:
             response = requests.get(url, headers=headers, cookies=cookies, proxies=proxies)
             if response.status_code == 200:
                 data = response.json()
-                return [item['id'] for item in data['items'] if 'id' in item]
+                print(f'Posts for user {user_id}:')
+                pprint(data)
+                return data['items']  # Return full post data
             else:
                 logger.warning(f"Failed to fetch posts for user {user_id}. Status code: {response.status_code}")
                 return None
@@ -175,94 +180,87 @@ class InstagramTaggedScraper:
             logger.error(f"Error occurred while fetching posts for user {user_id}: {str(e)}")
             return None
 
-    def check_post_for_tag(self, post_id, account):
-        url = f"https://i.instagram.com/api/v1/media/{post_id}/info/"
-        headers = {
-            'User-Agent': account['user_agent'],
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'X-IG-App-ID': '936619743392459',
-            'X-ASBD-ID': '198387',
-            'X-IG-WWW-Claim': '0',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Connection': 'keep-alive',
-            'Referer': 'https://www.instagram.com/',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-site',
-        }
-        cookies = {cookie.split('=')[0]: cookie.split('=')[1] for cookie in account['cookies'].split('; ')}
-        proxies = {
-            'http': f"http://{account['proxy_username']}:{account['proxy_password']}@{account['proxy_address']}:{account['proxy_port']}",
-            'https': f"http://{account['proxy_username']}:{account['proxy_password']}@{account['proxy_address']}:{account['proxy_port']}"
-        }
+    def check_post_for_tag_in_post_data(self, post):
+        # Check 'usertags'
+        usertags = post.get('usertags', {}).get('in', [])
+        for tag in usertags:
+            tagged_user_id = str(tag['user']['pk'])
+            if tagged_user_id == self.target_user_id:
+                return True
 
-        try:
-            response = requests.get(url, headers=headers, cookies=cookies, proxies=proxies)
-            if response.status_code == 200:
-                data = response.json()
-                if 'usertags' in data['items'][0]:
-                    tagged_users = data['items'][0]['usertags']['in']
-                    return any(user['user']['pk'] == self.target_user_id for user in tagged_users)
-            return False
-        except Exception as e:
-            logger.error(f"Error occurred while checking post {post_id} for tags: {str(e)}")
-            return False
+        # Check 'coauthor_producers' and 'invited_coauthor_producers'
+        coauthors = post.get('coauthor_producers', []) + post.get('invited_coauthor_producers', [])
+        for coauthor in coauthors:
+            coauthor_id = str(coauthor['id'])
+            if coauthor_id == self.target_user_id:
+                return True
+
+        # Check mentions in 'caption'
+        caption_text = post.get('caption', {}).get('text', '')
+        if f"@{self.target_username}" in caption_text.lower():
+            return True
+
+        return False
 
     def process_single_user(self, user_id):
-        logger.info(f"Processing user ID {user_id}")
+        username = self.user_data.get(user_id, "Unknown")
+        logger.info(f"Processing user ID {user_id} (Username: {username})")
+        
+        if user_id in self.processed_users:
+            logger.info(f"User ID {user_id} (Username: {username}) already processed. Skipping.")
+            return
+
+        account = self.get_next_available_account()
+        if not account:
+            logger.error(f"No available accounts to process user ID {user_id} (Username: {username})")
+            return
+
         max_retries = 5
         retries = 0
         self.user_tried_accounts[user_id] = set()
 
         while retries < max_retries:
-            account = None
-            while account is None:
+            if account['id'] in self.user_tried_accounts[user_id]:
+                logger.info(f"Account {account['id']} already tried for user ID {user_id} (Username: {username}), looking for another account")
                 account = self.get_next_available_account()
-                if account is None:
-                    logger.warning(f"No available accounts. Waiting before retry for user ID {user_id}")
-                    self.display_account_status()
-                    time.sleep(5)
-                elif account['id'] in self.user_tried_accounts[user_id]:
-                    logger.info(f"Account {account['id']} already tried for user ID {user_id}, looking for another account")
-                    account = None
-
-            if account:
-                self.user_tried_accounts[user_id].add(account['id'])
+                if not account:
+                    logger.error(f"No available accounts to process user ID {user_id} (Username: {username})")
+                    return
 
             try:
                 self.display_account_status()
                 posts = self.fetch_user_posts(user_id, account)
                 if posts is None:
-                    logger.warning(f"Failed to fetch posts for user ID {user_id}")
+                    logger.warning(f"Failed to fetch posts for user ID {user_id} (Username: {username})")
                     self.set_account_timeout(account['id'])
                 else:
                     tagged_posts = []
-                    for post_id in posts:
-                        if self.check_post_for_tag(post_id, account):
-                            tagged_posts.append(post_id)
+                    for post in posts:
+                        if self.check_post_for_tag_in_post_data(post):
+                            tagged_posts.append(post['id'])
                     
                     if tagged_posts:
                         self.tagged_posts[user_id] = tagged_posts
-                        logger.info(f"User ID {user_id} has {len(tagged_posts)} posts tagging the target user")
+                        self.successful_taggers.add(user_id)
+                        logger.info(f"User ID {user_id} (Username: {username}) has {len(tagged_posts)} posts tagging the target user")
                     else:
-                        logger.info(f"User ID {user_id} has no posts tagging the target user")
+                        logger.info(f"User ID {user_id} (Username: {username}) has no posts tagging the target user")
                     
                     self.processed_users.add(user_id)
                     with self.account_lock:
                         self.successful_fetches += 1
-                    logger.info(f"Successfully processed user ID {user_id}")
+                    logger.info(f"Successfully processed user ID {user_id} (Username: {username})")
                     self.wait_with_jitter(account['id'])
                     return
             except Exception as e:
-                logger.error(f"Error occurred while scraping user ID {user_id}: {str(e)}")
+                logger.error(f"Error occurred while scraping user ID {user_id} (Username: {username}): {str(e)}")
                 logger.error(traceback.format_exc())
                 self.set_account_timeout(account['id'])
 
             self.wait_with_jitter(account['id'])
             retries += 1
 
-        logger.error(f"Max retries reached for user ID {user_id}. Skipping.")
+        logger.error(f"Max retries reached for user ID {user_id} (Username: {username}). Skipping.")
 
     def set_account_timeout(self, account_id):
         timeout_until = datetime.now() + timedelta(minutes=5)
@@ -292,11 +290,11 @@ class InstagramTaggedScraper:
 
     def scrape_tagged_posts(self):
         start_time = time.time()
-        total_users = len(self.user_ids)
+        total_users = len(self.user_data)
         processed_count = 0
 
         with ThreadPoolExecutor(max_workers=len(self.account_data)) as executor:
-            futures = [executor.submit(self.process_single_user, user_id) for user_id in self.user_ids]
+            futures = [executor.submit(self.process_single_user, user_id) for user_id in self.user_data.keys()]
             
             total_to_process = len(futures)
             for i, future in enumerate(as_completed(futures), 1):
@@ -309,6 +307,7 @@ class InstagramTaggedScraper:
 
         self.save_results()
         logger.info(f"Scraping completed. Processed {len(self.processed_users)} user IDs.")
+        self.display_tagging_summary()
 
     def display_progress(self, processed_count, total_users, start_time):
         elapsed_time = time.time() - start_time
@@ -336,11 +335,39 @@ class InstagramTaggedScraper:
             logger.info(f"Unsuccessful attempts: {unsuccessful_attempts}")
             logger.info(f"Unsuccessful rate: {unsuccessful_rate:.2f} users/second")
 
+    def create_tagged_posts_table(self, connection):
+        cursor = None
+        try:
+            cursor = connection.cursor()
+            create_table_query = """
+            CREATE TABLE IF NOT EXISTS tagged_posts (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id VARCHAR(255),
+                post_id VARCHAR(255),
+                target_user_id VARCHAR(255),
+                csv_filename VARCHAR(255),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_tag (user_id, post_id, target_user_id)
+            )
+            """
+            cursor.execute(create_table_query)
+            connection.commit()
+            logger.info("Tagged posts table created or already exists")
+        except Error as e:
+            logger.error(f"Error creating tagged_posts table: {e}")
+        finally:
+            if cursor:
+                cursor.close()
+
     def save_results(self):
         connection = None
         cursor = None
         try:
             connection = self.db_pool.get_connection()
+            
+            # Create the table if it doesn't exist
+            self.create_tagged_posts_table(connection)
+            
             cursor = connection.cursor()
 
             query = """
@@ -372,23 +399,34 @@ class InstagramTaggedScraper:
                     writer.writerow([user_id, post_id, self.target_user_id])
         logger.info(f"Saved results to CSV file: {self.csv_filename}")
 
+    def display_tagging_summary(self):
+        logger.info("=== Tagging Summary ===")
+        logger.info(f"Total users who tagged the target: {len(self.successful_taggers)}")
+        logger.info("Users who tagged the target:")
+        for user_id in self.successful_taggers:
+            username = self.user_data.get(user_id, "Unknown")
+            post_count = len(self.tagged_posts.get(user_id, []))
+            logger.info(f"  - User ID: {user_id}, Username: {username}, Tagged Posts: {post_count}")
+
 def main():
     import sys
-    if len(sys.argv) != 6:
-        print("Usage: python tagged_scraper.py <user_ids_json> <target_user_id> <csv_filename> <account_data_json> <db_config_json>")
+    if len(sys.argv) != 7:
+        print("Usage: python tagged_scraper.py <user_data_json> <target_user_id> <target_username> <csv_filename> <account_data_json> <db_config_json>")
         sys.exit(1)
 
-    user_ids = json.loads(sys.argv[1])
+    user_data = json.loads(sys.argv[1])  # Dict with user_id as key and username as value
     target_user_id = sys.argv[2]
-    csv_filename = sys.argv[3]
-    account_data = sys.argv[4]
-    db_config = sys.argv[5]
+    target_username = sys.argv[3]
+    csv_filename = sys.argv[4]
+    account_data = sys.argv[5]
+    db_config = sys.argv[6]
 
-    scraper = InstagramTaggedScraper(user_ids, target_user_id, csv_filename, account_data, db_config)
-    logger.info(f"Scraping tagged posts for {len(user_ids)} user IDs")
+    scraper = InstagramTaggedScraper(user_data, target_user_id, target_username, csv_filename, account_data, db_config)
+    logger.info(f"Scraping tagged posts for {len(user_data)} users")
     logger.info(f"Using accounts with IDs: {', '.join(str(id) for id in scraper.account_id_to_index.keys())}")
     scraper.display_account_status()
     scraper.scrape_tagged_posts()
+    logger.info(f"Number of successful taggers: {len(scraper.successful_taggers)}")
 
 if __name__ == "__main__":
     main()
