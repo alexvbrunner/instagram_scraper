@@ -9,6 +9,8 @@ import logging
 import mysql.connector
 from mysql.connector import Error
 import time
+import argparse
+from collections import Counter
 
 # Add the Scrapers directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -240,7 +242,32 @@ def update_clickup_status(task_id, new_status):
     except requests.exceptions.RequestException as e:
         logger.error(f"Error updating ClickUp task status: {str(e)}")
 
+def read_usernames_from_file(filename):
+    with open(filename, 'r') as file:
+        return [line.strip() for line in file if line.strip()]
+
+def save_results_to_csv(usernames, user_ids, successful_taggers, csv_filename):
+    with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ['Username', 'User ID', 'Number of Tagged Posts']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        
+        writer.writeheader()
+        for username in usernames:
+            user_id = user_ids.get(username, 'N/A')
+            tagged_posts_count = Counter(successful_taggers)[str(user_id)] if user_id != 'N/A' else 0
+            writer.writerow({
+                'Username': username,
+                'User ID': user_id,
+                'Number of Tagged Posts': tagged_posts_count
+            })
+    
+    logger.info(f"Results saved to {csv_filename}")
+
 def main():
+    parser = argparse.ArgumentParser(description="Instagram Tagged Post Scraper")
+    parser.add_argument("--file", help="Path to text file containing usernames")
+    args = parser.parse_args()
+
     connection = get_database_connection()
     accounts = get_accounts_from_database(connection)
 
@@ -279,28 +306,26 @@ def main():
     account_ids = [account['id'] for account in account_data]
     logger.info(f"Using accounts with IDs: {', '.join(map(str, account_ids))}")
 
-    # Get list ID based on list name
-    list_name = 'Ecobelleza'
-    target_username = 'ecobelleza.oficial'
-    try:
-        list_id = get_list_id(list_name)
-        logger.info(f"Found list ID: {list_id}")
-    except ValueError as e:
-        logger.error(str(e))
-        return
-
-    # Fetch data from ClickUp
-    try:
-        tasks = fetch_clickup_data(list_id)
-        logger.info(f"Fetched {len(tasks)} tasks from ClickUp")
-        usernames = extract_usernames(tasks)
-        logger.info(f"Extracted {len(usernames)} usernames with non-null Instagram handles")
-    except Exception as e:
-        logger.error(f"Error fetching data from ClickUp: {str(e)}")
-        return
+    if args.file:
+        # Read usernames from file
+        usernames = read_usernames_from_file(args.file)
+        logger.info(f"Read {len(usernames)} usernames from file: {args.file}")
+    else:
+        # Use ClickUp to fetch usernames
+        list_name = 'Ecobelleza'
+        try:
+            list_id = get_list_id(list_name)
+            logger.info(f"Found list ID: {list_id}")
+            tasks = fetch_clickup_data(list_id)
+            logger.info(f"Fetched {len(tasks)} tasks from ClickUp")
+            usernames = extract_usernames(tasks)
+            logger.info(f"Extracted {len(usernames)} usernames with non-null Instagram handles")
+        except Exception as e:
+            logger.error(f"Error fetching data from ClickUp: {str(e)}")
+            return
 
     if not usernames:
-        logger.info("No tasks found with Instagram handles and 'check posting' status.")
+        logger.info("No usernames found to process.")
         return
 
     logger.info(f"Found {len(usernames)} usernames to process.")
@@ -309,6 +334,7 @@ def main():
     user_ids = get_user_ids(usernames, account_data, db_config)
 
     # Get target user ID
+    target_username = 'ecobelleza.oficial'
     target_user_id = get_user_ids([target_username], account_data, db_config).get(target_username)
     
     if not target_user_id:
@@ -333,16 +359,21 @@ def main():
         successful_taggers = scraper.successful_taggers
         logger.info("Tagged post scraping process completed.")
 
-        # Update ClickUp status for successful taggers
-        for task in tasks:
-            custom_fields = task.get('custom_fields', [])
-            instagram_handle = next((field.get('value') for field in custom_fields 
-                                     if field['id'] == "0aa99d2a-335a-429a-adde-3cd0a1a78d0a" and field.get('value')), None)
-            if instagram_handle:
-                user_id = user_ids.get(instagram_handle)
-                if user_id and str(user_id) in successful_taggers:
-                    update_clickup_status(task['id'], "aftercare")
-                    logger.info(f"Updated ClickUp status to 'aftercare' for user {instagram_handle} (ID: {user_id})")
+        # Save results to CSV
+        results_csv_filename = f"tagged_posts_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        save_results_to_csv(usernames, user_ids, successful_taggers, results_csv_filename)
+
+        # Update ClickUp status only if not using file input
+        if not args.file:
+            for task in tasks:
+                custom_fields = task.get('custom_fields', [])
+                instagram_handle = next((field.get('value') for field in custom_fields 
+                                         if field['id'] == "0aa99d2a-335a-429a-adde-3cd0a1a78d0a" and field.get('value')), None)
+                if instagram_handle:
+                    user_id = user_ids.get(instagram_handle)
+                    if user_id and str(user_id) in successful_taggers:
+                        update_clickup_status(task['id'], "aftercare")
+                        logger.info(f"Updated ClickUp status to 'aftercare' for user {instagram_handle} (ID: {user_id})")
 
     else:
         logger.warning("No user IDs found to scrape tagged posts. Skipping tagged post scraping.")

@@ -36,6 +36,22 @@ def verify_email_with_retry(email):
             return False
     return False
 
+# Get user input for email verification
+verify_emails = False
+
+def process_email(email, ig_handle, first_name):
+    if verify_emails:
+        print(f"\nVerifying email: {email}")
+        if verify_email_with_retry(email):
+            print(f"Email valid: {email}")
+            return True
+        else:
+            print(f"Email invalid or verification failed: {email}")
+            return False
+    else:
+        print(f"\nAssuming email is valid: {email}")
+        return True
+
 # Get user input for the input CSV file
 input_filename = input("Enter the name of the input CSV file (without .csv extension): ")
 input_file = os.path.join('exported_data', f'{input_filename}.csv')
@@ -73,6 +89,22 @@ with open(input_file, 'r', encoding='utf-8') as infile, open(output_file, 'a', n
     # Write the header row if the file is new
     if outfile.tell() == 0:
         writer.writeheader()
+        
+        # Always write the first user
+        writer.writerow({
+            'IG Handle': 'fil',
+            'E-Mail': 'filtrading68@gmail.com',
+            'First Name': 'Filip'
+        })
+        processed_emails.add('filtrading68@gmail.com')
+
+        # Always write the first user
+        writer.writerow({
+            'IG Handle': 'Tester',
+            'E-Mail': '-',
+            'First Name': 'Tester'
+        })
+        processed_emails.add('-')
     
     # Process each row in the input file with a progress bar
     for row in tqdm(reader, total=total_rows, desc="Processing rows"):
@@ -90,10 +122,8 @@ with open(input_file, 'r', encoding='utf-8') as infile, open(output_file, 'a', n
             # Remove emojis from the first name
             first_name = remove_emojis(first_name)
             
-            # Verify the email with retry
-            print(f"\nVerifying email: {email}")
-            if verify_email_with_retry(email):
-                print(f"Email valid: {email}")
+            # Process the email (verify or assume valid)
+            if process_email(email, ig_handle, first_name):
                 # Write the extracted data to the output file
                 writer.writerow({
                     'IG Handle': ig_handle,
@@ -101,8 +131,6 @@ with open(input_file, 'r', encoding='utf-8') as infile, open(output_file, 'a', n
                     'First Name': first_name
                 })
                 processed_emails.add(email)
-            else:
-                print(f"Email invalid or verification failed: {email}")
         elif email in processed_emails:
             print(f"\nSkipping already processed email: {email}")
         else:
