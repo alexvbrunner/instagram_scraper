@@ -6,12 +6,15 @@ certifi==2024.7.4
 cffi==1.16.0
 charset-normalizer==3.3.2
 cryptography==43.0.0
+disposable-email-domains==0.0.107
+dnspython==2.6.1
 gender-guesser==0.4.0
 h11==0.14.0
 h2==4.1.0
 hpack==4.0.0
 hyperframe==6.0.1
 idna==3.7
+instaloader==4.13
 kaitaistruct==0.10
 mysql-connector-python==9.0.0
 numpy==2.0.1
@@ -37,6 +40,7 @@ six==1.16.0
 sniffio==1.3.1
 sortedcontainers==2.4.0
 soupsieve==2.5
+tqdm==4.66.5
 trio==0.26.0
 trio-websocket==0.11.1
 typing_extensions==4.12.2
@@ -46,5 +50,6 @@ urllib3==2.2.2
 webdriver-manager==4.0.2
 websocket-client==1.8.0
 websockets==12.0
+whois==1.20240129.2
 wsproto==1.2.0
 zstandard==0.23.0
