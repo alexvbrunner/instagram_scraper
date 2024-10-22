@@ -5,6 +5,9 @@ from email_validator import verify_email
 from dns.exception import Timeout as DNSTimeout
 from tqdm import tqdm
 import time
+import concurrent.futures
+import threading
+import itertools
 
 def remove_emojis(text):
     emoji_pattern = re.compile("["
@@ -37,7 +40,7 @@ def verify_email_with_retry(email):
     return False
 
 # Get user input for email verification
-verify_emails = False
+verify_emails = True
 
 def process_email(email, ig_handle, first_name):
     if verify_emails:
@@ -51,6 +54,46 @@ def process_email(email, ig_handle, first_name):
     else:
         print(f"\nAssuming email is valid: {email}")
         return True
+
+def is_valid_name(name):
+    # Check if the name contains only letters, spaces, and common punctuation
+    return bool(re.match(r'^[a-zA-Z\s\'\-\.]+$', name))
+
+# New function to process a batch of rows
+def process_batch(batch, writer, processed_emails, lock):
+    local_processed = set()
+    local_results = []
+
+    for row in batch:
+        ig_handle = row['username']
+        email = row['public_email']
+        
+        if email and email not in processed_emails and email not in local_processed:
+            full_name = row['full_name']
+            
+            # Use the username if the full name is invalid or empty
+            if full_name and is_valid_name(full_name):
+                first_name = full_name.split()[0]
+            else:
+                first_name = ig_handle
+            
+            first_name = remove_emojis(first_name)
+            
+            if process_email(email, ig_handle, first_name):
+                local_results.append({
+                    'IG Handle': ig_handle,
+                    'E-Mail': email,
+                    'First Name': first_name
+                })
+                local_processed.add(email)
+        elif email in processed_emails or email in local_processed:
+            print(f"\nSkipping already processed email: {email}")
+        else:
+            print(f"\nSkipping row for {ig_handle} (no email provided)")
+
+    with lock:
+        writer.writerows(local_results)
+        processed_emails.update(local_processed)
 
 # Get user input for the input CSV file
 input_filename = input("Enter the name of the input CSV file (without .csv extension): ")
@@ -106,34 +149,24 @@ with open(input_file, 'r', encoding='utf-8') as infile, open(output_file, 'a', n
         })
         processed_emails.add('-')
     
-    # Process each row in the input file with a progress bar
-    for row in tqdm(reader, total=total_rows, desc="Processing rows"):
-        ig_handle = row['username']
-        email = row['public_email']
+    # Create a lock for thread-safe writing
+    lock = threading.Lock()
+    
+    # Create a ThreadPoolExecutor
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # Process rows in batches
+        batch_size = 100
+        futures = []
         
-        # Only process rows with a non-empty email that hasn't been processed before
-        if email and email not in processed_emails:
-            full_name = row['full_name']
-            
-            # Extract first name (assuming it's the first word in full_name)
-            # If no full_name, use the username
-            first_name = full_name.split()[0] if full_name else ig_handle
-            
-            # Remove emojis from the first name
-            first_name = remove_emojis(first_name)
-            
-            # Process the email (verify or assume valid)
-            if process_email(email, ig_handle, first_name):
-                # Write the extracted data to the output file
-                writer.writerow({
-                    'IG Handle': ig_handle,
-                    'E-Mail': email,
-                    'First Name': first_name
-                })
-                processed_emails.add(email)
-        elif email in processed_emails:
-            print(f"\nSkipping already processed email: {email}")
-        else:
-            print(f"\nSkipping row for {ig_handle} (no email provided)")
+        for i in range(0, total_rows, batch_size):
+            batch = list(itertools.islice(reader, batch_size))
+            if not batch:
+                break
+            future = executor.submit(process_batch, batch, writer, processed_emails, lock)
+            futures.append(future)
+        
+        # Use tqdm to show progress
+        for _ in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Processing batches"):
+            pass
 
 print(f"\nData extraction and validation complete. Valid emails saved to {output_file}")

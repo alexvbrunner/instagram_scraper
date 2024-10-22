@@ -13,19 +13,26 @@ import numpy as np
 from datetime import datetime, timedelta
 import threading
 from mysql.connector.pooling import MySQLConnectionPool
+from db_utils import (
+    get_database_connection,
+    get_accounts_from_database,
+    prepare_account_data,
+    update_account_last_checked,
+    mark_account_invalid
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class InstagramTaggedScraper:
     def __init__(self, user_data, target_user_id, target_username, csv_filename, account_data, db_config):
-        self.user_data = user_data  # This should be a dict with user_id as key and username as value
+        self.user_data = user_data
         self.target_user_id = str(target_user_id)
         self.target_username = target_username.lower()
         self.csv_filename = csv_filename
         self.account_data = json.loads(account_data)
         self.db_config = json.loads(db_config)
-        self.db_pool = MySQLConnectionPool(pool_name="mypool", pool_size=5, **self.db_config)
+        self.db_pool = mysql.connector.pooling.MySQLConnectionPool(pool_name="mypool", pool_size=5, **self.db_config)
         self.account_id_to_index = {}
         self.setup_accounts()
         self.account_timeouts = {}
@@ -424,7 +431,7 @@ def main():
         print("Usage: python tagged_scraper.py <user_data_json> <target_user_id> <target_username> <csv_filename> <account_data_json> <db_config_json>")
         sys.exit(1)
 
-    user_data = json.loads(sys.argv[1])  # Dict with user_id as key and username as value
+    user_data = json.loads(sys.argv[1])
     target_user_id = sys.argv[2]
     target_username = sys.argv[3]
     csv_filename = sys.argv[4]

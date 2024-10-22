@@ -12,6 +12,13 @@ import numpy as np
 from datetime import datetime, timedelta
 import threading
 from mysql.connector.pooling import MySQLConnectionPool
+from db_utils import (
+    get_database_connection,
+    get_accounts_from_database,
+    prepare_account_data,
+    update_account_last_checked,
+    mark_account_invalid
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -22,7 +29,7 @@ class InstagramUserIDScraper:
         self.csv_filename = csv_filename
         self.account_data = json.loads(account_data)
         self.db_config = json.loads(db_config)
-        self.db_pool = MySQLConnectionPool(pool_name="mypool", pool_size=5, **self.db_config)
+        self.db_pool = mysql.connector.pooling.MySQLConnectionPool(pool_name="mypool", pool_size=5, **self.db_config)
         self.account_id_to_index = {}
         self.setup_accounts()
         self.processed_usernames = set()

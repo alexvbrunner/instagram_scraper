@@ -4,10 +4,8 @@ import sys
 import os
 import json
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
-import mysql.connector
-from mysql.connector import Error
 import time
 import argparse
 from collections import Counter
@@ -17,6 +15,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Scrapers.v4_userid_scraper import InstagramUserIDScraper
 from Scrapers.tagged_scraper import InstagramTaggedScraper
+from db_utils import (
+    get_database_connection,
+    get_accounts_from_database,
+    prepare_account_data,
+    update_account_last_checked,
+    mark_account_invalid,
+    db_config
+)
 
 # ClickUp API configuration
 CLICKUP_API_KEY = "pk_36436044_38D41W302D9XIE59WEGJJ8PT87Q8FE9X"
@@ -25,60 +31,6 @@ CLICKUP_API_URL = f"https://api.clickup.com/api/v2/folder/{FOLDER_ID}/list"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-db_config = {
-    'host': '127.0.0.1',
-    'user': 'root',
-    'password': 'password',
-    'database': 'main'
-}
-
-def get_database_connection():
-    try:
-        connection = mysql.connector.connect(**db_config)
-        return connection
-    except Error as e:
-        logger.error(f"Error connecting to MySQL database: {e}")
-        sys.exit(1)
-
-def get_accounts_from_database(connection):
-    try:
-        cursor = connection.cursor(dictionary=True)
-        
-        current_time = datetime.now()
-        cutoff_time = current_time - timedelta(minutes=15)
-        
-        cursor.execute("""
-            SELECT id, proxy_address, proxy_port, proxy_username, proxy_password, 
-                   cookies, user_agent, cookie_timestamp
-            FROM accounts 
-            WHERE instagram_created = TRUE 
-              AND cookies IS NOT NULL
-              AND status = 'Active'
-              AND cookie_timestamp > %s
-        """, (cutoff_time,))
-        
-        accounts = cursor.fetchall()
-        cursor.close()
-        
-        valid_accounts = []
-        for account in accounts:
-            cookie_time = account['cookie_timestamp']
-            if isinstance(cookie_time, str):
-                cookie_time = datetime.fromisoformat(cookie_time.replace('T', ' ').split('.')[0])
-            age = current_time - cookie_time
-            if age <= timedelta(minutes=15):
-                valid_accounts.append(account)
-                logger.info(f"Account ID: {account['id']}, Cookie Age: {age}")
-            else:
-                logger.info(f"Skipping Account ID: {account['id']}, Cookie Age: {age} (too old)")
-        
-        logger.info(f"Total accounts: {len(accounts)}, Valid accounts: {len(valid_accounts)}")
-        
-        return valid_accounts
-    except Error as e:
-        logger.error(f"Error fetching accounts from database: {e}")
-        sys.exit(1)
 
 def get_list_id(list_name):
     headers = {
@@ -151,10 +103,9 @@ def get_user_ids(usernames, account_data, db_config):
     connection = None
     cursor = None
     try:
-        connection = mysql.connector.connect(**db_config)
+        connection = get_database_connection()
         cursor = connection.cursor(dictionary=True)
 
-        # Prepare the query
         placeholders = ', '.join(['%s'] * len(usernames))
         query = f"""
         SELECT username, user_id 
@@ -162,34 +113,27 @@ def get_user_ids(usernames, account_data, db_config):
         WHERE username IN ({placeholders})
         """
 
-        # Execute the query
         cursor.execute(query, tuple(usernames))
-
-        # Fetch all results
         results = cursor.fetchall()
 
-        # Process results
         for row in results:
             user_ids[row['username']] = row['user_id']
 
         logger.info(f"Retrieved {len(user_ids)} user IDs from database")
 
-        # Identify usernames without user IDs
         missing_usernames = set(usernames) - set(user_ids.keys())
         if missing_usernames:
             logger.warning(f"Missing user IDs for {len(missing_usernames)} usernames. Scraping them now.")
             
-            # Scrape missing user IDs
             csv_filename = f"user_ids_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             scraper = InstagramUserIDScraper(list(missing_usernames), csv_filename, json.dumps(account_data), json.dumps(db_config))
             new_user_ids = scraper.scrape_user_ids()
             
-            # Update user_ids with newly scraped IDs
             user_ids.update(new_user_ids)
             
             logger.info(f"Scraped {len(new_user_ids)} new user IDs")
 
-    except Error as e:
+    except Exception as e:
         logger.error(f"Error querying user IDs from database: {e}")
     finally:
         if cursor:
@@ -198,33 +142,6 @@ def get_user_ids(usernames, account_data, db_config):
             connection.close()
 
     return user_ids
-
-def get_target_user_id(username, account_data, db_config):
-    existing_user_ids = get_user_ids([username], account_data, db_config)
-    if username in existing_user_ids:
-        logger.info(f"Found existing user ID for target username {username}")
-        return existing_user_ids[username]
-
-    csv_filename = f"target_user_id_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    max_retries = 3
-    retry_count = 0
-
-    while retry_count < max_retries:
-        scraper = InstagramUserIDScraper([username], csv_filename, json.dumps(account_data), json.dumps(db_config))
-        new_user_ids = scraper.scrape_user_ids()
-        user_id = new_user_ids.get(username)
-        
-        if user_id:
-            logger.info(f"Successfully retrieved user ID for target username {username}")
-            existing_user_ids[username] = user_id
-            return user_id
-        
-        retry_count += 1
-        logger.warning(f"Failed to get user ID for target username {username}. Retry {retry_count}/{max_retries}")
-        time.sleep(5)  # Wait 5 seconds before retrying
-
-    logger.error(f"Failed to get user ID for target username {username} after {max_retries} attempts")
-    return None
 
 def update_clickup_status(task_id, new_status):
     headers = {
@@ -291,27 +208,15 @@ def main():
 
     selected_accounts = random.sample(accounts, num_accounts)
 
-    account_data = []
-    for account in selected_accounts:
-        account_data.append({
-            'id': account['id'],
-            'proxy_address': account['proxy_address'],
-            'proxy_port': account['proxy_port'],
-            'proxy_username': account['proxy_username'],
-            'proxy_password': account['proxy_password'],
-            'cookies': account['cookies'],
-            'user_agent': account['user_agent']
-        })
+    account_data = prepare_account_data(selected_accounts)
 
     account_ids = [account['id'] for account in account_data]
     logger.info(f"Using accounts with IDs: {', '.join(map(str, account_ids))}")
 
     if args.file:
-        # Read usernames from file
         usernames = read_usernames_from_file(args.file)
         logger.info(f"Read {len(usernames)} usernames from file: {args.file}")
     else:
-        # Use ClickUp to fetch usernames
         list_name = 'Ecobelleza'
         try:
             list_id = get_list_id(list_name)
@@ -330,10 +235,8 @@ def main():
 
     logger.info(f"Found {len(usernames)} usernames to process.")
 
-    # Get user IDs (from database and scrape if necessary)
     user_ids = get_user_ids(usernames, account_data, db_config)
 
-    # Get target user ID
     target_username = 'ecobelleza.oficial'
     target_user_id = get_user_ids([target_username], account_data, db_config).get(target_username)
     

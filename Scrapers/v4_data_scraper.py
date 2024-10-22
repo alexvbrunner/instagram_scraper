@@ -8,17 +8,21 @@ from mysql.connector import Error
 import traceback
 import gender_guesser.detector as gender
 import concurrent.futures
-import queue
-import heapq
 import numpy as np
-from queue import Queue, PriorityQueue
+from queue import Queue
 import threading
 from datetime import datetime, timedelta
 from collections import deque
 from mysql.connector.pooling import MySQLConnectionPool
+from db_utils import (
+    get_database_connection,
+    get_accounts_from_database,
+    prepare_account_data,
+    update_account_last_checked,
+    mark_account_invalid
+)
 
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class CookieState:
@@ -29,57 +33,65 @@ class CookieState:
         self.index = index
         self.account_id = account_id
         self.last_request_time = 0
+        self.next_available_time = 0
         self.is_rate_limited = False
         self.rate_limit_until = 0
-        self.normal_cooldown = 10  # 10 seconds
+        self.normal_cooldown = 60  # Adjusted to 60 seconds
         self.rate_limit_cooldown = 300  # 5 minutes
-        self.consecutive_rate_limits = 0  # New attribute to track consecutive rate limits
+        self.consecutive_rate_limits = 0
+        self.last_rate_limit_time = None
+        self.is_in_use = False  # New attribute
 
     def can_make_request(self):
         current_time = time.time()
         if self.is_rate_limited:
             return current_time >= self.rate_limit_until
-        return current_time >= self.last_request_time + self.normal_cooldown
+        return current_time >= self.next_available_time
 
     def record_request(self):
         self.last_request_time = time.time()
+        jitter = self.calculate_jitter()
+        self.next_available_time = self.last_request_time + self.normal_cooldown + jitter
+
+    def calculate_jitter(self):
+        activity_type = random.choices(['quick', 'normal', 'engaged'], weights=[0.3, 0.5, 0.2])[0]
+        if activity_type == 'quick':
+            jitter = np.random.exponential(scale=10)
+        elif activity_type == 'normal':
+            jitter = np.random.normal(loc=50, scale=25)
+        else:  # engaged
+            jitter = np.random.normal(loc=150, scale=50)
+        if random.random() < 0.1:
+            jitter += np.random.uniform(300, 1500)
+        jitter = max(jitter, 15)  # Ensure a minimum wait time of 15 seconds
+        logger.info(f"Calculated jitter of {jitter:.2f} seconds for account {self.account_id}.")
+        return jitter
 
     def set_rate_limit(self):
+        current_time = time.time()
         self.is_rate_limited = True
-        self.rate_limit_until = time.time() + self.rate_limit_cooldown
-        self.consecutive_rate_limits += 1  # Increment consecutive rate limits
+        self.rate_limit_until = current_time + self.rate_limit_cooldown
+        self.next_available_time = self.rate_limit_until
+        if self.last_rate_limit_time is None or current_time >= self.last_rate_limit_time + self.rate_limit_cooldown:
+            # If the last rate limit was before the cooldown period, reset the counter
+            self.consecutive_rate_limits = 1
+        else:
+            self.consecutive_rate_limits += 1
+        self.last_rate_limit_time = current_time
 
     def reset_rate_limit(self):
         self.is_rate_limited = False
         self.rate_limit_until = 0
-        self.consecutive_rate_limits = 0  # Reset consecutive rate limits when successful
+        self.consecutive_rate_limits = 0
+        self.last_rate_limit_time = None  # Reset last rate limit time
 
     def time_until_available(self):
         current_time = time.time()
         if self.is_rate_limited:
             return max(0, self.rate_limit_until - current_time)
-        return max(0, self.last_request_time + self.wait_with_jitter() - current_time)
-    
-    def wait_with_jitter(self):
-        activity_type = random.choices(['quick', 'normal', 'engaged'], weights=[0.5, 0.3, 0.2])[0]
-        
-        if activity_type == 'quick':
-            jitter = np.random.exponential(scale=2)
-        elif activity_type == 'normal':
-            jitter = np.random.normal(loc=10, scale=5)
-        else:  # engaged
-            jitter = np.random.normal(loc=30, scale=10)
+        return max(0, self.next_available_time - current_time)
 
-        # Add micro-breaks
-        if random.random() < 0.1:  # 10% chance of a micro-break
-            jitter += np.random.uniform(60, 300)  # 1-5 minute break
-
-        jitter = max(jitter, 0.5)
-
-        logger.debug(f"Waiting for {jitter:.2f} seconds.")
-        return jitter
-
-class InstagramUserDataScraper:
+class InstagramDataScraper:
     def __init__(self, user_ids, csv_filename, account_data, db_config):
         self.user_ids = user_ids
         self.csv_filename = csv_filename
@@ -91,12 +103,12 @@ class InstagramUserDataScraper:
         self.gender_detector = gender.Detector()
         self.state = self.load_state()
         self.cookie_states = self.initialize_cookie_states()
-        self.account_queue = deque(self.cookie_states)
         self.account_lock = threading.Lock()
         self.max_concurrent_requests = min(len(self.cookie_states), 10)  # Adjust the maximum as needed
         self.request_lock = threading.Lock()
         self.account_wait_times = {account['id']: 0 for account in self.account_data}
         self.start_time = time.time()
+        self.account_jitter_info = {}
         self.scrape_count = 0
         self.user_queue = Queue()
         for user_id in self.user_ids:
@@ -115,27 +127,28 @@ class InstagramUserDataScraper:
     def initialize_cookie_states(self):
         cookie_states = []
         for i, account in enumerate(self.account_data):
-            proxy = f"{account['proxy_username']}:{account['proxy_password']}@{account['proxy_address']}:{account['proxy_port']}"
+            proxy = account['proxy_url']
             cookie_state = CookieState(account['cookies'], proxy, account['user_agent'], i, account['id'])
             cookie_states.append(cookie_state)
         return cookie_states
 
     def get_next_available_account(self):
-        start_time = time.time()
         while True:
-            if not self.account_queue:
-                self.account_queue.extend([cs for cs in self.cookie_states if cs.account_id not in self.disabled_accounts])
-
-            for _ in range(len(self.account_queue)):
-                account = self.account_queue.popleft()
-                if account.account_id not in self.disabled_accounts and account.can_make_request():
+            with self.account_lock:
+                available_accounts = [
+                    acc for acc in self.cookie_states
+                    if acc.can_make_request() and not acc.is_in_use and acc.account_id not in self.disabled_accounts
+                ]
+                if available_accounts:
+                    account = random.choice(available_accounts)
+                    account.is_in_use = True  # Mark as in use
                     return account
-                self.account_queue.append(account)
-
-            if time.time() - start_time >= 3:
-                logger.warning("No available accounts. Waiting for 3 seconds.")
-                time.sleep(3)
-                start_time = time.time()
+            time_to_wait = min(
+                acc.time_until_available() for acc in self.cookie_states
+                if acc.account_id not in self.disabled_accounts and not acc.is_in_use
+            )
+            logger.warning(f"No accounts available. Waiting for {time_to_wait:.2f} seconds.")
+            time.sleep(time_to_wait)
 
     def load_state(self):
         try:
@@ -288,6 +301,7 @@ class InstagramUserDataScraper:
                 logger.debug(f"User data: {user_data}")
                 logger.debug(f"User data type: {type(user_data)}")
                 if user_data:
+                    account.reset_rate_limit()  # Reset rate limit counters on success
                     processed_data = self.process_user_data(user_data)
                     if processed_data:
                         self.save_user_data(processed_data)
@@ -308,22 +322,16 @@ class InstagramUserDataScraper:
                 else:
                     logger.warning(f"No data found for user ID: {user_id}")
                     retry_count += 1
-                    account.set_rate_limit()
-                    if account.consecutive_rate_limits >= 3:
-                        logger.warning(f"Account ID {account.account_id} has been rate limited 3 times in a row. Disabling it.")
-                        self.disabled_accounts.add(account.account_id)
+                    # Rate limiting is handled in fetch_user_data
             except Exception as e:
                 logger.error(f"Error occurred while scraping User ID {user_id}: {str(e)}")
                 logger.error(traceback.format_exc())
                 retry_count += 1
-                if account:
-                    account.set_rate_limit()
-                    if account.consecutive_rate_limits >= 3:
-                        logger.warning(f"Account ID {account.account_id} has been rate limited 3 times in a row. Disabling it.")
-                        self.disabled_accounts.add(account.account_id)
+                # Rate limiting is handled in fetch_user_data
             finally:
+                # Release the account
                 if account and account.account_id not in self.disabled_accounts:
-                    self.account_queue.append(account)
+                    account.is_in_use = False
                 account = None  # Reset account for the next iteration
 
             if retry_count < max_retries:
@@ -337,14 +345,16 @@ class InstagramUserDataScraper:
         self.save_state()
 
     def get_new_cookie_from_db(self, account_id, old_cookie):
+        connection = None
+        cursor = None
         try:
-            connection = mysql.connector.connect(**self.db_config)
+            connection = self.db_pool.get_connection()
             cursor = connection.cursor(dictionary=True)
             query = """
             SELECT cookies 
             FROM accounts 
             WHERE id = %s 
-            ORDER BY cookie_timestamp DESC
+            ORDER BY last_checked DESC
             LIMIT 1
             """
             cursor.execute(query, (account_id,))
@@ -358,48 +368,42 @@ class InstagramUserDataScraper:
         except Error as e:
             logger.error(f"Error fetching new cookie from database: {e}")
         finally:
-            if connection.is_connected():
+            if cursor:
                 cursor.close()
+            if connection:
                 connection.close()
         return None
 
-    def check_and_update_cookie(self, cookie_state):
-        account_id = cookie_state.account_id
+    def check_and_update_cookie(self, account):
+        account_id = account.account_id
         logger.debug(f"Checking for new cookie for account ID {account_id}")
-        new_cookie = self.get_new_cookie_from_db(account_id, cookie_state.cookie)
-        if new_cookie and new_cookie != cookie_state.cookie:
+        new_cookie = self.get_new_cookie_from_db(account_id, account.cookie)
+        if new_cookie and new_cookie != account.cookie:
             logger.info(f"New cookie found for account ID {account_id}. Updating.")
             logger.info(f'New cookie: {new_cookie}')
-            logger.info(f'Current cookie: {cookie_state.cookie}')
-            cookie_state.cookie = new_cookie
-            cookie_state.is_rate_limited = False
-            cookie_state.rate_limit_until = 0
-            cookie_state.last_request_time = 0
+            logger.info(f'Current cookie: {account.cookie}')
+            account.cookie = new_cookie
+            account.is_rate_limited = False
+            account.rate_limit_until = 0
+            account.last_request_time = 0
+            account.next_available_time = time.time()  # Reset next available time
             self.account_wait_times[account_id] = 30
         else:
             logger.debug(f"No new cookie found for account ID {account_id}")
-        return cookie_state
+        return account
 
     def fetch_user_data(self, user_id, account):
         if not account.can_make_request():
             logger.warning(f"Rate limit reached for account ID {account.account_id}")
-            account.set_rate_limit()
             return None
 
-        with self.request_lock:
-            cookie_state = account
-            if cookie_state is None:
-                logger.warning("No available cookies. Waiting before retry...")
-                time.sleep(5)
-                return None
-
-        current_account_id = cookie_state.account_id
+        current_account_id = account.account_id
         logger.info(f"Fetching data for user ID {user_id} with account ID {current_account_id}")
-        
-        cookie_state = self.check_and_update_cookie(cookie_state)
-        
+
+        account = self.check_and_update_cookie(account)
+
         url = f"https://i.instagram.com/api/v1/users/{user_id}/info/"
-        
+
         headers = {
             'User-Agent': 'Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; samsung; SM-G991B; o1s; exynos2100; en_US; 458229258)',
             'Accept-Language': 'en-US',
@@ -410,25 +414,24 @@ class InstagramUserDataScraper:
         }
 
         cookies = {}
-        for cookie in cookie_state.cookie.split(';'):
+        for cookie in account.cookie.split(';'):
             if '=' in cookie:
                 name, value = cookie.strip().split('=', 1)
                 cookies[name] = value
 
         proxies = {
-            'http': f'http://{cookie_state.proxy}',
-            'https': f'http://{cookie_state.proxy}'
+            'http': account.proxy,
+            'https': account.proxy
         }
 
         try:
             response = requests.get(url, headers=headers, cookies=cookies, proxies=proxies, timeout=30)
-            account.record_request()
             response.raise_for_status()
             data = response.json()
-                
-            logger.debug(f"Successfully fetched data")
+            account.record_request()
+            logger.info(f"Successfully fetched data")
             logger.debug(f"Response data: {json.dumps(data, indent=2)}")
-            
+
             if 'user' in data:
                 self.display_statistics()
                 return data['user']
@@ -436,29 +439,34 @@ class InstagramUserDataScraper:
                 logger.warning(f"No user data found for user ID: {user_id}")
                 return None
         except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 400:
-                response_content = e.response.content.decode('utf-8')
+            response_content = e.response.content.decode('utf-8')
+            if e.response.status_code == 429:
+                logger.warning(f"Rate limit hit for account ID {account.account_id}.")
+                account.set_rate_limit()
+                return None
+            elif e.response.status_code == 401:
+                logger.warning(f"Unauthorized access for account ID {account.account_id}.")
+                account.set_rate_limit()
+                return None
+            elif e.response.status_code == 400:
                 if "challenge_required" in response_content:
                     logger.error(f"Challenge required for account ID {current_account_id}. Disabling this account for the session.")
-                    cookie_state.is_rate_limited = True
-                    cookie_state.rate_limit_until = time.time() + cookie_state.rate_limit_cooldown
+                    account.is_rate_limited = True
+                    account.rate_limit_until = time.time() + account.rate_limit_cooldown
+                    self.disabled_accounts.add(account.account_id)
                     self.save_state()
                     return None
                 else:
                     logger.error(f"HTTP Error 400 for account ID {current_account_id}, user ID {user_id}: {e}")
                     logger.error(f"Response content: {response_content}")
                     return None
-            elif e.response.status_code in [401, 429]:
-                logger.warning(f"Rate limit hit for account ID {current_account_id}.")
-                account.set_rate_limit()
-                return None
             else:
                 logger.error(f"HTTP Error for account ID {current_account_id}, user ID {user_id}: {e}")
                 logger.error(f"Response content: {e.response.content}")
+                return None
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching data for user ID {user_id}: {str(e)}")
-        
-        return None
+            return None
 
     def update_rate_limit_info(self, account_id, headers):
         if 'X-Ratelimit-Remaining' in headers:
@@ -662,8 +670,8 @@ def main():
     account_data = sys.argv[3]
     db_config = sys.argv[4]
 
-    scraper = InstagramUserDataScraper(user_ids, csv_filename, account_data, db_config)
-    logger.info(f"Scraping user data for {len(user_ids)} users")
+    scraper = InstagramDataScraper(user_ids, csv_filename, account_data, db_config)
+    logger.info(f"Scraping data for {len(user_ids)} user IDs")
     logger.info(f"Using accounts with IDs: {', '.join(str(id) for id in scraper.account_id_to_index.keys())}")
     scraper.scrape_user_data()
 

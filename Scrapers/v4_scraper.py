@@ -12,6 +12,13 @@ import numpy as np
 from gender_guesser import detector as gender_detector
 import queue
 import heapq
+from db_utils import (
+    get_database_connection,
+    get_accounts_from_database,
+    prepare_account_data,
+    update_account_last_checked,
+    mark_account_invalid
+)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -59,12 +66,13 @@ class CookieState:
     def __eq__(self, other):
         return self.last_request_time == other.last_request_time
 
-class InstagramScraper:
+class InstagramFollowerScraper:
     def __init__(self, user_id, csv_filename, account_data, db_config):
         self.user_id = user_id
         self.csv_filename = csv_filename
         self.account_data = json.loads(account_data)
         self.db_config = json.loads(db_config)
+        self.db_pool = mysql.connector.pooling.MySQLConnectionPool(pool_name="mypool", pool_size=5, **self.db_config)
         self.base_url = f"https://i.instagram.com/api/v1/friendships/{self.user_id}/followers/"
         self.params = {"count": 25, "search_surface": "follow_list_page"}
         self.cookie_queue = queue.Queue()
@@ -176,14 +184,16 @@ class InstagramScraper:
             logger.info(f"update_max_id: Updated current_max_id to: {self.current_max_id}")
 
     def get_new_cookie_from_db(self, account_id, old_cookie):
+        connection = None
+        cursor = None
         try:
-            connection = mysql.connector.connect(**self.db_config)
+            connection = self.db_pool.get_connection()
             cursor = connection.cursor(dictionary=True)
             query = """
             SELECT cookies 
             FROM accounts 
             WHERE id = %s 
-            ORDER BY cookie_timestamp DESC
+            ORDER BY last_checked DESC
             LIMIT 1
             """
             cursor.execute(query, (account_id,))
@@ -197,8 +207,9 @@ class InstagramScraper:
         except Error as e:
             logger.error(f"Error fetching new cookie from database: {e}")
         finally:
-            if connection.is_connected():
+            if cursor:
                 cursor.close()
+            if connection:
                 connection.close()
         return None
 
@@ -858,11 +869,10 @@ def main():
     account_data = sys.argv[3]
     db_config = sys.argv[4]
 
-    scraper = InstagramScraper(user_id, csv_filename, account_data, db_config)
+    scraper = InstagramFollowerScraper(user_id, csv_filename, account_data, db_config)
     logger.info(f"Scraping followers for User ID: {user_id}")
     logger.info(f"Using accounts with IDs: {', '.join(str(id) for id in scraper.account_id_to_index.keys())}")
     scraper.main()
 
 if __name__ == "__main__":
     main()
-
