@@ -7,7 +7,7 @@ def download_avatar(gender, index):
     url = f"https://xsgames.co/randomusers/avatar.php?g={gender}"
     response = requests.get(url)
     if response.status_code == 200:
-        folder_path = Path("Avatars") / "generated_avatars"
+        folder_path = Path("Avatars") / "generated_avatars_female"
         folder_path.mkdir(parents=True, exist_ok=True)
         file_path = folder_path / f"{gender}_{index}.png"
         with open(file_path, "wb") as f:
@@ -24,8 +24,8 @@ def generate_avatars(num_male, num_female, max_threads=10):
         concurrent.futures.wait(male_futures + female_futures)
 
 if __name__ == "__main__":
-    num_male_avatars = 1000
-    num_female_avatars = 1000
+    num_male_avatars = 0
+    num_female_avatars = 5000
     max_threads = 20
 
     generate_avatars(num_male_avatars, num_female_avatars, max_threads)
