@@ -103,7 +103,7 @@ input_file = os.path.join('exported_data', f'{input_filename}.csv')
 output_filename = f'{input_filename}_extracted.csv'
 output_file = os.path.join('extracted_data', output_filename)
 
-# Ensure the extracted_data directory exists
+# Ensure the extracted_data directory existsbu
 os.makedirs('extracted_data', exist_ok=True)
 
 print(f"Reading from: {input_file}")
